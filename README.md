@@ -1,7 +1,16 @@
-# xmig
+# Mnemosyne
 
 #### 介绍
-Build a heterogeneous integrated XPU migration capability to achieve AI computing power decoupling and seamless migration of training tasks, supporting scenarios such as AI training fault recovery, service scheduling, and resource integration.
+The rapid scaling of large language model (LLM) training clusters has made GPU errors the norm rather than the exception. Traditional error recovery methods such as periodic checkpointing introduce substantial overhead in both daily operations and recovery processes. 
+While the most recent advances in just-in-time checkpointing reduces the overhead by eliminating the periodic checkpoint saving procedure and optimizing the recovery workflow, the intrinsic GPU context decoupling mechanism and global reinitialization of communication backend remain resource-intensive and slow. 
+
+In this repo, we design Mnemosyne, a lightweight and fast error recovery framework for efficient LLM training. 
+Mnemosyne first introduces a lightweight device proxy architecture optimized for fault recovery rather than general elasticity, reducing steady-state operational costs. 
+Second, Mnemosyne designs a flexible collective communication library (CCL) that supports communication/calculation-free re-initialization as well as communicator scaling and adjustment, greatly accelerating the construction of collective communication.
+
+The technical foundation of Mnemosyne lies in our well-designed techniques. 
+First, the device proxy takes advantage of our automated code generation tools to boost our development workflow. Besides, all phases of its workflow are facilitated by efficient mechanisms, e.g., fused IPC and logging, unified ultra-fast handle mapping, state pulling with taken-over GPU memory management, etc. 
+Second, the flexible CCL makes as many resources as possible persistent to reduce the rebuilding overhead. Specifically, for the reinitialization case, it fully leverages built bootstrap network as well as calculated topology and graph information to avoid repeated operations. Additionally, in the adjustment case, it conducts initialization operations in different scopes according to each rank’s original status.
 
 #### 软件架构
 软件架构说明
