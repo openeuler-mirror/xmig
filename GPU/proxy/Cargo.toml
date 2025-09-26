@@ -1,0 +1,10 @@
+[package]
+name = "xgpu-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cudarc = { version = "0.17.3", features = ["cuda-version-from-build-system"] }
