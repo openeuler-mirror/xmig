@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+    "common",
+    "proxy",
+    "server",
+]
+
+[profile.release]
+opt-level = 3
+debug = true
+rpath = false
