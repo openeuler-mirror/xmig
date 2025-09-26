@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: Mulan PSL v2
+/*
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This software is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of Mulan PSL v2 at:
+ *         http://license.coscl.org.cn/MulanPSL2
+ *
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PSL v2 for more details.
+ */
+
+syntax = "proto3";
+
+package xgpu.types.journal.v1;
+
+message ComputeCapability  {
+    uint32 major = 1;
+    uint32 minor = 2;
+}
+
+message DeviceInfo {
+    uint32 device_id = 1;                      // Device ID (0, 1, ...).
+    string device_name = 2;                    // Device name, e.g., "NVIDIA A100".
+    uint64 total_memory = 3;                   // Device total memory in byte.
+    ComputeCapability compute_capability = 4;  // Device compute capability, e.g., 8.9.
+}
+
+message SystemInfo {
+    optional string toolkit_version = 1;       // CUDA Toolkit Version, e.g., "12.2".
+    optional string runtime_version = 2;       // CUDA Runtime Version, e.g., "12.2.140".
+    optional string driver_version = 3;        // CUDA Driver Version, e.g., "535.104.05".
+    repeated DeviceInfo devices = 4;           // Device list.
+}
+
+message ProcessInfo {
+    uint32 id = 1;                             // Process id.
+    string exec_name = 2;                      // Executable name.
+    string cmd_line = 3;                       // Command line.
+}
+
+message JournalVersion  {
+    uint32 major = 1;                          // Major version.
+    uint32 minor = 2;                          // Minor version.
+    optional uint32 patch = 3;                 // Patch version.
+}
+
+message JournalContext {
+    SystemInfo system = 1;                     // System info.
+    ProcessInfo process = 2;                   // Process info.
+}
+
+message JournalHeader {
+    fixed32 magic = 1;                         // Journal magic, should be ​​0x78475055 (ASCII for "xGPU").
+    JournalVersion version = 2;                // Journal version, e.g., 1.0.
+    fixed64 timestamp_ns = 3;                  // Journal timestamp.
+    JournalContext context = 4;                // Journal context.
+}
+
+message JournalFooter {
+    uint64 blocks = 1;                         // Journal total block count.
+    bytes sha256_digest = 2;                   // Journal SHA-256 digest.
+}
+
+message JournalPayload {
+    uint64 length = 1;                         // Payload length in byte.
+    fixed32 crc32_checksum = 2;                // Payload CRC32 checksum.
+
+    oneof payload {
+        bytes data_bytes = 3;                  // For small payloads embedded directly in the journal.
+        uint64 file_index = 4;                 // For large payloads stored in external files.
+    }
+}
+
+message JournalBlock {
+    uint64 block_id = 1;                       // Block sequential ID.
+    fixed64 timestamp_ns = 2;                  // Block timestamp.
+    uint64 thread_id = 3;                      // Thread id of API call.
+    JournalPayload msg_payload = 4;            // Serialized API call message (e.g., CudaMallocRequest).
+    optional JournalPayload data_payload = 5;  // Optional API call data (e.g., the buffer for a cudaMemcpy).
+}
