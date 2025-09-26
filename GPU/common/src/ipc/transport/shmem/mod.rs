@@ -12,13 +12,20 @@
  * See the Mulan PSL v2 for more details.
  */
 
-pub mod types {
-    pub mod journal {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/xgpu.types.journal.v1.rs"));
-        }
-    }
-}
+//! A shared-memory (SHMEM) transport layer implementation.
+//!
+//! This module provides a high-performance, inter-process communication mechanism
+//! built on shared memory ring buffers. It uses one channel for each direction of
+//! communication. Synchronization is managed by `parking_lot` primitives placed
+//! within the shared memory segment itself.
 
-pub mod ipc;
-pub mod sys;
+mod mirrored;
+
+mod buffer;
+mod channel;
+
+mod endpoint;
+pub use endpoint::*;
+
+mod transport;
+pub use transport::*;

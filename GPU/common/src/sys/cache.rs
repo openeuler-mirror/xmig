@@ -12,13 +12,28 @@
  * See the Mulan PSL v2 for more details.
  */
 
-pub mod types {
-    pub mod journal {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/xgpu.types.journal.v1.rs"));
-        }
+use std::ops::{Deref, DerefMut};
+
+/// Wrapper type to ensure cache line alignment and padding
+#[repr(align(64))]
+#[derive(Debug)]
+pub struct CacheLineAligned<T>(pub T);
+
+impl<T> CacheLineAligned<T> {
+    pub const fn new(value: T) -> Self {
+        CacheLineAligned(value)
     }
 }
 
-pub mod ipc;
-pub mod sys;
+impl<T> Deref for CacheLineAligned<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for CacheLineAligned<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
