@@ -23,14 +23,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_type().is_file() &&
-            e.path().extension().map_or(false, |ext| ext == "proto")
+            e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "proto")
         })
         .map(|e| e.into_path())
         .collect();
 
-    prost_build::Config::new()
-        .compile_protos(&proto_files, &[PROTO_DIR])?;
+    prost_build::Config::new().compile_protos(&proto_files, &[PROTO_DIR])?;
 
     for file in &proto_files {
         println!("cargo:rerun-if-changed={}", file.display());
