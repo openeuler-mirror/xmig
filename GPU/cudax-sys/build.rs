@@ -88,6 +88,7 @@ fn generate_all_bindings(include_paths: &[&Path]) {
         .join("include");
     let nccl_src_include_path = Path::new(&env::var("NCCL_SRC_HOME")
         .unwrap_or(NCCL_SRC_HOME.to_string()))
+        .join("src")
         .join("include");
 
     generate_single_binding(
