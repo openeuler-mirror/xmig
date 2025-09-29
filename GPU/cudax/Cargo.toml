@@ -1,0 +1,11 @@
+[package]
+name = "cudax"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bindgen = "0.72.1"
+cudax_sys = { path = "../cudax-sys", package = "cudax-sys" }
+
+[build-dependencies]
+bindgen = "0.72.1"
