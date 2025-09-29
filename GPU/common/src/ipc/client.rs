@@ -45,7 +45,7 @@ impl<T: Transport> Client<T> {
         };
 
         let mut reader = BytewiseBuffer::new(payload);
-        let message = B::read_from(&mut reader)?;
+        let message = B::read_from_mut(&mut reader)?;
 
         read_buf.consume(data_len)?;
 

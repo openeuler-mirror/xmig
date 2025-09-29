@@ -12,17 +12,49 @@
  * See the Mulan PSL v2 for more details.
  */
 
-use std::{marker::PhantomData, ptr, slice};
-use std::sync::Arc;
-use std::any::Any;
-use std::fmt;
+use std::{
+    any::{TypeId, type_name},
+    fmt::Debug,
+    marker::PhantomData,
+    ptr, slice,
+};
 
 use bitflags::bitflags;
 use thiserror::Error;
 
 use crate::ipc::bytewise::{
-    BytewiseReader, BytewiseWriter, BytewiseError, BytewiseReadOwned, BytewiseWrite,
+    BytewiseError, BytewiseReadOwned, BytewiseReader, BytewiseWrite, BytewiseWriter,
 };
+
+const INLINED_DATA_SIZE: usize = 16;
+const INLINED_DATA_ALIGN: usize = 16;
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentError {
+    #[error("Argument type mismatch (expect: {expect}, actual: {actual})")]
+    TypeMismatch {
+        expect: &'static str,
+        actual: &'static str,
+    },
+
+    #[error("Argument type size mismatch (expect: {expect}, actual: {actual})")]
+    TypeSizeMismatch { expect: usize, actual: usize },
+
+    #[error("Argument type alignment mismatch (expect: {expect}, actual: {actual})")]
+    TypeAlignMismatch { expect: usize, actual: usize },
+
+    #[error("Attempted to downcast non-scalar argument to scalar")]
+    TypeIsNotScalar,
+
+    #[error("Attempted to downcast non-slice argument to slice")]
+    TypeIsNotSlice,
+
+    #[error("Attempted to access unaligned data")]
+    UnalignedAccess,
+
+    #[error("Attempted to access non mutable data as mutable")]
+    IllegalMutation,
+}
 
 bitflags! {
     #[repr(transparent)]
@@ -40,455 +72,490 @@ impl Default for ArgumentFlag {
     }
 }
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum ArgumentError {
-    #[error("Argument type size mismatch (expected: {expected}, found: {actual})")]
-    TypeSizeMismatch { expected: usize, actual: usize },
-
-    #[error("Argument type alignment mismatch (expected: {expected}, found: {actual})")]
-    TypeAlignMismatch { expected: usize, actual: usize },
-
-    #[error("Attempted to access null pointer")]
-    NullPointer,
-
-    #[error(
-        "Attempted to access unaligned data (type_name: '{type_name}', alignment: {alignment})"
-    )]
-    UnalignedData {
-        type_name: &'static str,
-        alignment: usize,
-    },
-
-    #[error("Attempted to access non mutable data as mutable")]
-    NonMutableData,
-
-    #[error("Attempted to access Value as Pointer")]
-    ExpectedPointer,
-
-    #[error("Attempted to access Pointer as Value")]
-    ExpectedValue,
-
-    #[error("Attempted to access Value with mismatched type")]
-    TypeMismatch,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgumentKind {
+    Scalar,
+    Slice,
 }
 
-#[repr(C)]
-#[derive(Clone)]
-pub enum Argument<'a> {
-    Pointer {
-        ptr: *const u8,
-        mutable: bool,
-        align: usize,
-        size: usize,
-        count: usize,
-        flag: ArgumentFlag,
-        data: PhantomData<&'a ()>,
-    },
-    Value {
-        value: Arc<dyn Any + 'static>,
-        flag: ArgumentFlag
+#[derive(Debug, Clone, Copy)]
+struct ArgumentMetadata {
+    type_id: TypeId,
+    type_name: &'static str,
+    kind: ArgumentKind,
+    size: usize,
+    align: usize,
+    count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(align(16))]
+struct InlineBytes([u8; INLINED_DATA_SIZE]);
+
+#[derive(Clone, Copy)]
+enum ArgumentValue<'a> {
+    Inlined(InlineBytes),
+    Ref(ptr::NonNull<u8>, PhantomData<&'a ()>),
+    Mut(ptr::NonNull<u8>, PhantomData<&'a mut ()>),
+}
+
+impl Debug for ArgumentValue<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inlined(_) => f.debug_tuple("Inlined").finish_non_exhaustive(),
+            Self::Ref(ptr, _) => f.debug_tuple("Borrowed").field(ptr).finish(),
+            Self::Mut(ptr, _) => f.debug_tuple("MutBorrowed").field(ptr).finish(),
+        }
     }
 }
 
-impl<'a> Argument<'a> {
-    pub fn try_ptr<T>(&self) -> Result<*const T, ArgumentError> {
-        match self {
-            Argument::Pointer { ptr, size, align, .. } => {
-                let expected_size = size_of::<T>();
-                if *size != expected_size {
-                    return Err(ArgumentError::TypeSizeMismatch {
-                        expected: expected_size,
-                        actual: *size,
-                    });
-                }
-
-                let expected_align = align_of::<T>();
-                if *align != expected_align {
-                    return Err(ArgumentError::TypeAlignMismatch {
-                        expected: expected_align,
-                        actual: *align,
-                    });
-                }
-
-                let data_ptr = *ptr as *const T;
-
-                if data_ptr.is_null() {
-                    return Err(ArgumentError::NullPointer);
-                }
-
-                if (data_ptr as usize) % align_of::<T>() != 0 {
-                    return Err(ArgumentError::UnalignedData {
-                        type_name: std::any::type_name::<T>(),
-                        alignment: align_of::<T>(),
-                    });
-                }
-
-                Ok(data_ptr)
-            }
-            Argument::Value { .. } => Err(ArgumentError::ExpectedPointer),
-        }
-    }
-
-    pub fn try_mut_ptr<T>(&self) -> Result<*mut T, ArgumentError> {
-        let const_ptr = self.try_ptr::<T>()?;
-
-        // 再次 match 获取 mutable 标志
-        match self {
-            Argument::Pointer { mutable, .. } => {
-                if !*mutable {
-                    return Err(ArgumentError::NonMutableData);
-                }
-            }
-            Argument::Value { .. } => return Err(ArgumentError::ExpectedPointer),
-        }
-
-        Ok(const_ptr as *mut T)
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct Argument<'a> {
+    meta: ArgumentMetadata,
+    value: ArgumentValue<'a>,
+    flag: ArgumentFlag,
 }
 
-impl<'a> Argument<'a> {
+impl Argument<'_> {
     #[inline]
-    pub const fn empty() -> Self {
-        // Create argument from stack ZST reference is safe
-        Self::with_ref(&(), ArgumentFlag::ARG_IN)
+    pub const fn type_id(&self) -> TypeId {
+        self.meta.type_id
     }
 
     #[inline]
-    pub fn with_value<T: 'static>(value: T, flag: ArgumentFlag) -> Self {
-        Self::Value { value: Arc::new(value), flag: (flag) }
+    pub const fn type_name(&self) -> &'static str {
+        self.meta.type_name
     }
 
     #[inline]
-    pub const fn with_ref<T>(value: &'a T, flag: ArgumentFlag) -> Self {
-        Self::Pointer {
-            ptr: ptr::from_ref(value).cast(),
-            mutable: false,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
-            flag,
-            data: PhantomData,
-        }
-    }
-
-    #[inline]
-    pub const fn with_ref_mut<T>(value: &'a mut T, flag: ArgumentFlag) -> Self {
-        Self::Pointer {
-            ptr: ptr::from_mut(value).cast(),
-            mutable: true,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
-            flag,
-            data: PhantomData,
-        }
-    }
-
-    #[inline]
-    pub const fn with_slice<T>(value: &'a [T], flag: ArgumentFlag) -> Self {
-        Self::Pointer {
-            ptr: value.as_ptr().cast(),
-            mutable: false,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: value.len(),
-            flag,
-            data: PhantomData,
-        }
-    }
-
-    #[inline]
-    pub const fn with_slice_mut<T>(value: &'a mut [T], flag: ArgumentFlag) -> Self {
-        Self::Pointer {
-            ptr: value.as_mut_ptr().cast(),
-            mutable: true,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: value.len(),
-            flag,
-            data: PhantomData,
-        }
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Argument::Pointer { size, .. } => *size == 0,
-            Argument::Value { .. } => false,
-        }
-    }
-
-    #[inline]
-    pub fn flag(&self) -> ArgumentFlag {
-        match self {
-            Argument::Pointer { flag, .. } => *flag,
-            Argument::Value { flag, .. } => *flag,
-        }
-    }
-
-    #[inline]
-   pub fn try_value<T: Any + 'static + Clone>(&self) -> Result<T, ArgumentError> {
-        match self {
-            Argument::Pointer { .. } => Err(ArgumentError::ExpectedValue),
-            Argument::Value { value, .. } => {
-                if let Some(concrete) = value.downcast_ref::<T>() {
-                    return Ok(concrete.clone());
-                }
-                if let Some(arc) = value.downcast_ref::<Arc<T>>() {
-                    return Ok((**arc).clone());
-                }
-                Err(ArgumentError::TypeMismatch)
-            }
-        }
-    }
-
-    #[inline]
-    pub fn try_ref<T>(&self) -> Result<&T, ArgumentError> {
-        let value = unsafe { &*self.try_ptr::<T>()? };
-
-        Ok(value)
-    }
-
-    #[inline]
-    pub fn try_ref_mut<T>(&mut self) -> Result<&mut T, ArgumentError> {
-        let value_mut = unsafe { &mut *self.try_mut_ptr::<T>()? };
-
-        Ok(value_mut)
-    }
-
-    #[inline]
-    pub fn try_slice<T>(&self) -> Result<&[T], ArgumentError> {
-        let count = match self {
-            Argument::Pointer { count, .. } => *count,
-            Argument::Value { .. } => return Err(ArgumentError::ExpectedPointer),
-        };
-
-        let ptr = self.try_ptr::<T>()?;
-        let slice = unsafe { slice::from_raw_parts(ptr, count) };
-        //let slice = unsafe { slice::from_raw_parts(self.try_ptr::<T>()?, self.count) };
-
-        Ok(slice)
-    }
-
-    #[inline]
-    pub fn try_slice_mut<T>(&mut self) -> Result<&mut [T], ArgumentError> {
-        let count = match self {
-            Argument::Pointer { count, .. } => *count,
-            Argument::Value { .. } => return Err(ArgumentError::ExpectedPointer),
-        };
-        let slice_mut = unsafe { slice::from_raw_parts_mut(self.try_mut_ptr::<T>()?, count) };
-
-        Ok(slice_mut)
-    }
-
     pub const fn size(&self) -> usize {
-        match self {
-            Argument::Pointer { size, .. } => *size,
-            Argument::Value { .. } => {
-                0
-            }
-        }
+        self.meta.size.saturating_mul(self.meta.count)
     }
 
+    #[inline]
     pub const fn align(&self) -> usize {
-        match self {
-            Argument::Pointer { align, .. } => *align,
-            Argument::Value { .. } => 1,
-        }
+        self.meta.align
     }
 
-    pub const fn count(&self) -> usize {
-        match self {
-            Argument::Pointer { count, .. } => *count,
-            Argument::Value { .. } => 1,
-        }
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.size() == 0
     }
 
-    /// 是否为指针类型
-    pub const fn is_pointer(&self) -> bool {
-        matches!(self, Argument::Pointer { .. })
-    }
-
-    /// 是否为值类型
-    pub const fn is_value(&self) -> bool {
-        matches!(self, Argument::Value { .. })
+    #[inline]
+    pub const fn flag(&self) -> ArgumentFlag {
+        self.flag
     }
 }
 
-
-impl<'a> fmt::Debug for Argument<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Argument::Pointer { ptr, mutable, align, size, count, flag, .. } => f
-                .debug_struct("Argument::Pointer")
-                .field("ptr", ptr)
-                .field("mutable", mutable)
-                .field("align", align)
-                .field("size", size)
-                .field("count", count)
-                .field("flag", flag)
-                .finish(),
-            Argument::Value { value, flag } => f
-                .debug_struct("Argument::Value")
-                .field("value_type", &std::any::type_name_of_val(value))
-                .field("flag", flag)
-                .finish(),
-        }
+impl Argument<'_> {
+    #[inline]
+    pub fn empty() -> Argument<'static> {
+        Self::from_value((), ArgumentFlag::default())
     }
-}
 
-
-impl<'a> PartialEq for Argument<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Argument::Pointer {
-                    ptr: p1,
-                    mutable: m1,
-                    align: a1,
-                    size: s1,
-                    count: c1,
-                    flag: f1,
-                    ..
-                },
-                Argument::Pointer {
-                    ptr: p2,
-                    mutable: m2,
-                    align: a2,
-                    size: s2,
-                    count: c2,
-                    flag: f2,
-                    ..
-                },
-            ) => {
-                // 快速比较元数据
-                if m1 != m2 || a1 != a2 || s1 != s2 || c1 != c2 || f1 != f2 {
-                    return false;
-                }
-
-                // 零大小类型
-                if *s1 == 0 {
-                    return true;
-                }
-
-                // 指针相同
-                if *p1 == *p2 {
-                    return true;
-                }
-
-                // 任一为空
-                if (*p1 as usize) == 0 || (*p2 as usize) == 0 {
-                    return false;
-                }
-
-                // 比较底层字节
-                let bytes1 = unsafe { slice::from_raw_parts(*p1, *s1) };
-                let bytes2 = unsafe { slice::from_raw_parts(*p2, *s2) };
-                bytes1 == bytes2
-            }
-            (Argument::Value { value: v1, flag: f1 }, Argument::Value { value: v2, flag: f2 }) => {
-
-                let type_eq = v1.type_id() == v2.type_id();
-                let flag_eq = f1 == f2;
-                type_eq && flag_eq
-            }
-            _ => false,
+    #[inline]
+    pub fn from_value<T: Copy + 'static>(value: T, flag: ArgumentFlag) -> Argument<'static> {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Scalar,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: 1,
+        };
+        if meta.size > INLINED_DATA_SIZE {
+            panic!(
+                "Type '{}' size {} exceeds 16-byte limit",
+                type_name::<T>(),
+                meta.size
+            );
         }
+        if meta.align > INLINED_DATA_ALIGN {
+            panic!(
+                "Type '{}' alignment {} exceeds 16-byte limit",
+                type_name::<T>(),
+                meta.align
+            );
+        }
+
+        // For ZST, uses dangling pointer to save memory
+        if meta.size == 0 {
+            let value = ArgumentValue::Mut(ptr::NonNull::dangling(), PhantomData);
+            return Argument { meta, value, flag };
+        }
+
+        let mut bytes = InlineBytes([0u8; INLINED_DATA_SIZE]);
+        unsafe {
+            ptr::copy_nonoverlapping(
+                ptr::from_ref(&value).cast(),
+                bytes.0.as_mut_ptr(),
+                meta.size,
+            );
+        }
+        let value = ArgumentValue::Inlined(bytes);
+
+        Argument { meta, value, flag }
     }
-}
 
-impl<'a> Eq for Argument<'a> {}
-
-impl<'a> BytewiseReadOwned for Argument<'a> {
-    fn read_from<'b, R: BytewiseReader<'b>>(reader: &mut R) -> Result<Self, BytewiseError> {
-        // 读取 Argument 结构（不含实际数据）
-        let arg_meta = unsafe { reader.read_ref::<Argument>()? };
-
-        // 2. 根据元数据创建新的 Argument 实例
-        let mut arg = match *arg_meta {
-            Argument::Pointer {
-                align,
-                size,
-                count,
-                flag,
-                ..
-            } => Argument::Pointer {
-                ptr: std::ptr::null(),     // 临时空指针
-                mutable: false,
-                align,
-                size,
-                count,
-                flag,
-                data: PhantomData,
+    /// Creates an `Argument` from a raw constant pointer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer `ptr` adheres to the following conditions,
+    /// which are necessary to create a valid shared reference `&'a T`:
+    ///
+    /// 1. `ptr` must be non-null and point to a properly initialized value of type `T`.
+    /// 2. The memory pointed to by `ptr` must be valid for reads for the entire lifetime `'a`.
+    /// 3. For the entire lifetime `'a`, the data pointed to by `ptr` must **not be mutated**
+    ///    through any other pointer or reference. Multiple shared references are allowed, but
+    ///    any form of mutable access is forbidden.
+    ///
+    /// Failure to uphold these guarantees will result in **undefined behavior**.
+    #[inline]
+    pub unsafe fn from_ptr<'a, T: 'static>(ptr: *const T, flag: ArgumentFlag) -> Argument<'a> {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Scalar,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: 1,
+        };
+        let value = ArgumentValue::Ref(
+            {
+                let ptr = ptr::NonNull::new(ptr.cast_mut().cast()).expect("Invalid null pointer");
+                if meta.size != 0 && ptr == ptr::NonNull::dangling() {
+                    panic!("Invalid dangling pointer");
+                }
+                ptr
             },
-            Argument::Value { ref value, flag } =>
-            Argument::Value { value: value.clone(), flag }
-        };
+            PhantomData,
+        );
 
-        // 3. 读取实际数据到新指针
-        let data_ptr = unsafe {
-            reader.read_ptr(arg.size(), arg.align())?
-        };
-
-        // 4. 更新新实例的指针字段
-        if let Argument::Pointer { ptr, mutable, data, .. } = &mut arg {
-            *ptr = data_ptr;
-            *mutable = false;
-            *data = PhantomData;
-        }
-
-        Ok(arg)
+        Argument { meta, value, flag }
     }
 
-    fn read_from_mut<'b, R: BytewiseReader<'b>>(reader: &mut R) -> Result<Self, BytewiseError> {
-        let arg_meta = unsafe { reader.read_ref::<Argument>()? };
-
-        let mut arg = match arg_meta {
-            Argument::Pointer {
-                align, size, count, flag, ..
-            } => {
-                let data_ptr = unsafe { reader.read_ptr(*size, *align)? };
-                Argument::Pointer {
-                ptr: data_ptr,
-                mutable: true,
-                align: *align,
-                size: *size,
-                count: *count,
-                flag: *flag,
-                data: PhantomData,
-            }
-        },
-            Argument::Value {value, flag} => Argument::Value { value: value.clone(), flag: *flag }
+    /// Creates an `Argument` from a raw mutable pointer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer `ptr` adheres to the following conditions,
+    /// which are necessary to create a valid unique mutable reference `&'a mut T`:
+    ///
+    /// 1. `ptr` must be non-null and point to a properly initialized value of type `T`.
+    /// 2. The memory pointed to by `ptr` must be valid for both reads and writes for the
+    ///    entire lifetime `'a`.
+    /// 3. For the entire lifetime `'a`, **no other pointers or references (read or write)**
+    ///    may access the data pointed to by `ptr`. This `Argument` assumes it has
+    ///    exclusive access to the data.
+    ///
+    /// Failure to uphold these guarantees will result in **undefined behavior**.
+    #[inline]
+    pub unsafe fn from_mut_ptr<'a, T: 'static>(ptr: *mut T, flag: ArgumentFlag) -> Argument<'a> {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Scalar,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: 1,
         };
+        let value = ArgumentValue::Mut(
+            {
+                let ptr = ptr::NonNull::new(ptr.cast()).expect("Invalid null pointer");
+                if meta.size != 0 && ptr == ptr::NonNull::dangling() {
+                    panic!("Invalid dangling pointer");
+                }
+                ptr
+            },
+            PhantomData,
+        );
 
-        let data_ptr = unsafe {
-            reader.read_ptr(arg.size(), arg.align())?
-        };
-
-        if let Argument::Pointer { ptr, mutable, data, .. } = &mut arg {
-            *ptr = data_ptr;
-            *mutable = true;
-            *data = PhantomData;
-        }
-
-        Ok(arg)
+        Argument { meta, value, flag }
     }
 }
 
-impl<'a> BytewiseWrite for Argument<'a> {
+impl<'a> Argument<'a> {
+    #[inline]
+    pub fn from_ref<T: 'static>(value: &'a T, flag: ArgumentFlag) -> Self {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Scalar,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: 1,
+        };
+        let value = ArgumentValue::Ref(ptr::NonNull::from(value).cast(), PhantomData);
+
+        Self { meta, value, flag }
+    }
+
+    #[inline]
+    pub fn from_mut<T: 'static>(value: &'a mut T, flag: ArgumentFlag) -> Self {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Scalar,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: 1,
+        };
+        let value = ArgumentValue::Mut(ptr::NonNull::from(value).cast(), PhantomData);
+
+        Self { meta, value, flag }
+    }
+
+    #[inline]
+    pub fn from_slice<T: 'static>(value: &'a [T], flag: ArgumentFlag) -> Self {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Slice,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: value.len(),
+        };
+        let ptr =
+            ptr::NonNull::new(value.as_ptr().cast_mut().cast()).unwrap_or(ptr::NonNull::dangling());
+        let value = ArgumentValue::Ref(ptr, PhantomData);
+
+        Self { meta, value, flag }
+    }
+
+    #[inline]
+    pub fn from_mut_slice<T: 'static>(value: &'a mut [T], flag: ArgumentFlag) -> Self {
+        let meta = ArgumentMetadata {
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>(),
+            kind: ArgumentKind::Slice,
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            count: value.len(),
+        };
+        let ptr = ptr::NonNull::new(value.as_mut_ptr().cast()).unwrap_or(ptr::NonNull::dangling());
+        let value = ArgumentValue::Mut(ptr, PhantomData);
+
+        Self { meta, value, flag }
+    }
+}
+
+impl Argument<'_> {
+    fn validate_metadata<T: 'static>(
+        &self,
+        expected_kind: ArgumentKind,
+    ) -> Result<(), ArgumentError> {
+        if self.meta.type_id != TypeId::of::<T>() {
+            return Err(ArgumentError::TypeMismatch {
+                expect: self.meta.type_name,
+                actual: type_name::<T>(),
+            });
+        }
+
+        match (self.meta.kind, expected_kind) {
+            (ArgumentKind::Scalar, ArgumentKind::Slice) => {
+                return Err(ArgumentError::TypeIsNotSlice);
+            }
+            (ArgumentKind::Slice, ArgumentKind::Scalar) => {
+                return Err(ArgumentError::TypeIsNotScalar);
+            }
+            _ => {}
+        }
+
+        if size_of::<T>() > 0 {
+            if self.meta.size != size_of::<T>() {
+                return Err(ArgumentError::TypeSizeMismatch {
+                    expect: self.meta.size,
+                    actual: size_of::<T>(),
+                });
+            }
+            if self.meta.align != align_of::<T>() {
+                return Err(ArgumentError::TypeAlignMismatch {
+                    expect: self.meta.align,
+                    actual: align_of::<T>(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn get_ptr(&self) -> *const u8 {
+        match &self.value {
+            ArgumentValue::Inlined(bytes) => bytes.0.as_ptr(),
+            ArgumentValue::Ref(ptr, _) => ptr.as_ptr(),
+            ArgumentValue::Mut(ptr, _) => ptr.as_ptr(),
+        }
+    }
+
+    #[inline]
+    fn get_mut_ptr(&mut self) -> Result<*mut u8, ArgumentError> {
+        match &mut self.value {
+            ArgumentValue::Inlined(bytes) => Ok(bytes.0.as_mut_ptr()),
+            ArgumentValue::Mut(ptr, _) => Ok(ptr.as_ptr()),
+            ArgumentValue::Ref(_, _) => Err(ArgumentError::IllegalMutation),
+        }
+    }
+}
+
+impl<'a> Argument<'a> {
+    #[inline]
+    pub fn downcast<T: Copy + 'static>(&self) -> Result<T, ArgumentError> {
+        self.downcast_ref().copied()
+    }
+
+    #[inline]
+    pub fn downcast_ref<'s: 'a, T: 'static>(&'s self) -> Result<&'s T, ArgumentError> {
+        if size_of::<T>() == 0 {
+            self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+            return Ok(unsafe { ptr::NonNull::dangling().as_ref() });
+        }
+
+        self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+
+        let ptr = self.get_ptr().cast::<T>();
+        if !ptr.is_aligned() {
+            return Err(ArgumentError::UnalignedAccess);
+        }
+
+        Ok(unsafe { &*ptr })
+    }
+
+    /// Attempts to downcast the argument to a mutable reference of type `T`.
+    ///
+    /// # Safety
+    ///
+    /// This function is `unsafe` because it can create a mutable reference `&mut T`
+    /// from an internal raw pointer, bypassing the borrow checker.
+    ///
+    /// The caller MUST ensure that for the entire lifetime `'s` of the returned
+    /// mutable reference, **NO other references (mutable or shared)** to the same
+    /// data exist. This is a strict requirement of Rust's aliasing model.
+    ///
+    /// This includes any shared references that may have been previously created by
+    /// calling methods like `downcast_ref` on this **same** `Argument` instance.
+    ///
+    /// Violating this requirement is immediate **undefined behavior**.
+    #[inline]
+    pub unsafe fn downcast_mut<'s: 'a, T: 'static>(
+        &'s mut self,
+    ) -> Result<&'s mut T, ArgumentError> {
+        if size_of::<T>() == 0 {
+            self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+            return Ok(unsafe { ptr::NonNull::dangling().as_mut() });
+        }
+
+        self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+
+        let ptr = self.get_mut_ptr()?.cast::<T>();
+        if !ptr.is_aligned() {
+            return Err(ArgumentError::UnalignedAccess);
+        }
+
+        Ok(unsafe { &mut *ptr })
+    }
+
+    #[inline]
+    pub fn downcast_slice<'s: 'a, T: 'static>(&self) -> Result<&'s [T], ArgumentError> {
+        self.validate_metadata::<T>(ArgumentKind::Slice)?;
+
+        let ptr = self.get_ptr().cast::<T>();
+        if !ptr.is_aligned() {
+            return Err(ArgumentError::UnalignedAccess);
+        }
+
+        Ok(unsafe { slice::from_raw_parts(ptr, self.meta.count) })
+    }
+
+    /// Attempts to downcast the argument to a mutable slice of type `T`.
+    ///
+    /// # Safety
+    ///
+    /// This function is `unsafe` because it can create a mutable slice `&mut [T]`
+    /// from an internal raw pointer, bypassing the borrow checker.
+    ///
+    // The caller MUST ensure that for the entire lifetime `'s` of the returned
+    // mutable slice, **NO other references (mutable or shared)** to the same
+    // data exist. This is a strict requirement of Rust's aliasing model.
+    ///
+    /// This includes any shared references that may have been previously created by
+    /// calling methods like `downcast_slice` on this **same** `Argument` instance.
+    ///
+    /// Violating this requirement is immediate **undefined behavior**.
+    #[inline]
+    pub unsafe fn downcast_mut_slice<'s: 'a, T: 'static>(
+        &'s mut self,
+    ) -> Result<&'s mut [T], ArgumentError> {
+        self.validate_metadata::<T>(ArgumentKind::Slice)?;
+
+        let ptr = self.get_mut_ptr()?.cast::<T>();
+        if !ptr.is_aligned() {
+            return Err(ArgumentError::UnalignedAccess);
+        }
+
+        Ok(unsafe { slice::from_raw_parts_mut(ptr, self.meta.count) })
+    }
+}
+
+impl BytewiseReadOwned for Argument<'_> {
+    fn read_from<'a, R: BytewiseReader<'a>>(reader: &mut R) -> Result<Self, BytewiseError> {
+        // Read argument
+        let mut argument = unsafe { *reader.read_ref::<Argument>()? };
+
+        if !matches!(argument.value, ArgumentValue::Inlined(_)) {
+            // Read argument value
+            let data_ptr = unsafe { reader.read_ptr(argument.meta.size, argument.meta.align)? };
+            let value = ArgumentValue::Ref(
+                ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
+                PhantomData,
+            );
+
+            // Update argument value
+            argument.value = value;
+        }
+
+        Ok(argument)
+    }
+
+    fn read_from_mut<'a, R: BytewiseReader<'a>>(reader: &mut R) -> Result<Self, BytewiseError> {
+        // Read argument metadata
+        let mut argument = unsafe { *reader.read_ref::<Argument>()? };
+
+        if !matches!(argument.value, ArgumentValue::Inlined(_)) {
+            // Read argument value
+            let data_ptr = unsafe { reader.read_ptr(argument.meta.size, argument.meta.align)? };
+            let value = ArgumentValue::Mut(
+                ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
+                PhantomData,
+            );
+
+            // Update argument value
+            argument.value = value;
+        }
+
+        Ok(argument)
+    }
+}
+
+impl BytewiseWrite for Argument<'_> {
     fn write_to<W: BytewiseWriter>(&self, writer: &mut W) -> Result<(), BytewiseError> {
-        // 写入 Argument 元数据
+        // Write argument metadata
         unsafe {
             writer.write_ref(self)?;
         }
 
-        // 写入指针指向的数据
-        if let Argument::Pointer { ptr, size, align, .. } = self
-            && *size > 0 && !ptr.is_null() {
-                unsafe {
-                    writer.write_raw_ptr(*ptr, *size, *align)?;
-                }
-            }
+        // Write argument value
+        match self.value {
+            ArgumentValue::Inlined(inline_bytes) => unsafe { writer.write_ref(&inline_bytes)? },
+            ArgumentValue::Ref(ptr, _) => unsafe {
+                writer.write_raw_ptr(ptr.as_ptr(), self.size(), self.align())?;
+            },
+            ArgumentValue::Mut(ptr, _) => unsafe {
+                writer.write_raw_ptr(ptr.as_ptr(), self.size(), self.align())?;
+            },
+        }
 
         Ok(())
     }
@@ -498,209 +565,514 @@ impl<'a> BytewiseWrite for Argument<'a> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ZeroSizedStruct;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct Point {
         x: i32,
         y: i32,
     }
 
+    #[allow(dead_code)]
+    #[repr(align(16))]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct AlignedData(u32);
+
     #[test]
-    fn empty_value() {
+    fn test_empty_downcast() {
         let argument = Argument::empty();
-        println!("argument:  {:?}", argument);
+        println!("argument:  {:#?}", argument);
 
-        let value_ref = argument.try_ref::<()>().unwrap();
-        println!("value:     {:?}", value_ref);
+        let result = argument.downcast::<()>();
+        println!("result:    {:?}", result);
 
-        assert_eq!(argument.flag(), ArgumentFlag::ARG_IN);
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
-    fn value_success() {
-        let value = Point { x: 10, y: 20 };
-        println!("value:    {:?}", value);
+    fn test_empty_downcast_ref() {
+        let argument = Argument::empty();
+        println!("argument:  {:#?}", argument);
 
-        let argument = Argument::with_ref(&value, ArgumentFlag::ARG_IN);
-        println!("argument:  {:?}", argument);
+        let result = argument.downcast_ref::<()>();
+        println!("result:    {:?}", result);
 
-        let value_ref = argument.try_ref::<Point>().unwrap();
-        println!("value:     {:?}", value);
-
-        assert_eq!(*value_ref, value);
-        assert_eq!(argument.flag(), ArgumentFlag::ARG_IN);
+        assert_eq!(result, Ok(&()));
     }
 
     #[test]
-    fn value_type_mismatch_size() {
-        let value: i32 = 42;
-        println!("value:    {:?}", value);
+    fn test_empty_downcast_mut() {
+        let mut argument = Argument::empty();
+        println!("argument:  {:#?}", argument);
 
-        let argument = Argument::with_ref(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
+        let result = unsafe { argument.downcast_mut::<()>() };
+        println!("result:    {:?}", result);
 
-        let result = argument.try_ref::<i64>();
+        assert_eq!(result, Ok(&mut ()));
+    }
+
+    #[test]
+    fn test_zst_from_value_downcast() {
+        let orig_value = ZeroSizedStruct;
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast::<ZeroSizedStruct>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(orig_value));
+    }
+
+    #[test]
+    fn test_zst_from_value_downcast_ref() {
+        let orig_value = ZeroSizedStruct;
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_ref::<ZeroSizedStruct>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(&orig_value));
+    }
+
+    #[test]
+    fn test_zst_from_value_downcast_mut() {
+        let mut orig_value = ZeroSizedStruct;
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut::<ZeroSizedStruct>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(&mut orig_value));
+    }
+
+    #[test]
+    fn test_from_value_downcast() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(orig_value));
+    }
+
+    #[test]
+    fn test_from_value_downcast_ref() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_ref::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(&orig_value));
+    }
+
+    #[test]
+    fn test_from_value_downcast_mut() {
+        let mut orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut::<Point>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(&mut orig_value));
+    }
+
+    #[test]
+    fn test_from_value_downcast_slice() {
+        let orig_value = 1;
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_slice::<i32>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+    }
+
+    #[test]
+    fn test_from_value_downcast_mut_slice() {
+        let orig_value = 1;
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_value(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut_slice::<i32>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+    }
+
+    #[test]
+    fn test_from_ref_downcast() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_ref(&orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(orig_value));
+    }
+
+    #[test]
+    fn test_from_ref_downcast_ref() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_ref(&orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_ref::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(&orig_value));
+    }
+
+    #[test]
+    fn test_from_ref_downcast_mut() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_ref(&orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut::<Point>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::IllegalMutation));
+    }
+
+    #[test]
+    fn test_from_ref_downcast_slice() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_ref(&orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_slice::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+    }
+
+    #[test]
+    fn test_from_ref_downcast_mut_slice() {
+        let orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_ref(&orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut_slice::<Point>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+    }
+
+    #[test]
+    fn test_from_mut_downcast() {
+        let mut orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_mut(&mut orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(orig_value));
+    }
+
+    #[test]
+    fn test_from_mut_downcast_ref() {
+        let mut orig_value = Point { x: 10, y: 20 };
+        let value_ref = unsafe { &*ptr::from_ref(&orig_value) };
+
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_mut(&mut orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_ref::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(value_ref));
+    }
+
+    #[test]
+    fn test_from_mut_downcast_mut() {
+        let mut orig_value = Point { x: 10, y: 20 };
+
+        let value_mut = unsafe { &mut *ptr::from_mut(&mut orig_value) };
+
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_mut(&mut orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut::<Point>() };
+        println!("result:    {:?}", result);
+
+        let modified = result.expect("downcast_mut failed");
+        modified.x = 100;
+        modified.y = 100;
+
+        println!("original:  {:?}", value_mut);
+        println!("modified:  {:?}", modified);
+
+        assert_eq!(modified, value_mut);
+    }
+
+    #[test]
+    fn test_from_mut_downcast_slice() {
+        let mut orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_mut(&mut orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_slice::<Point>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+    }
+
+    #[test]
+    fn test_from_mut_downcast_mut_slice() {
+        let mut orig_value = Point { x: 10, y: 20 };
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_mut(&mut orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut_slice::<Point>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+    }
+
+    #[test]
+    fn test_from_slice_downcast_ref() {
+        let orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_slice(orig_value.as_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_ref::<i32>();
+        println!("result:    {:?}", result);
+
+        assert!(matches!(result, Err(ArgumentError::TypeIsNotScalar)));
+    }
+
+    #[test]
+    fn test_from_slice_downcast_mut() {
+        let orig_value = [1, 2, 3, 4].as_slice();
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_slice(orig_value, ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut::<i32>() };
+        println!("result:    {:?}", result);
+
+        assert!(matches!(result, Err(ArgumentError::TypeIsNotScalar)));
+    }
+
+    #[test]
+    fn test_from_slice_downcast_slice() {
+        let orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_slice(orig_value.as_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_slice::<i32>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(orig_value.as_slice()));
+    }
+
+    #[test]
+    fn test_from_slice_downcast_mut_slice() {
+        let orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
+
+        let mut argument = Argument::from_slice(orig_value.as_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut_slice::<i32>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Err(ArgumentError::IllegalMutation));
+    }
+
+    #[test]
+    fn test_from_mut_slice_downcast() {
+        let mut orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_mut_slice(orig_value.as_mut_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast::<&[i32]>();
+        println!("result:    {:?}", result);
+
         assert!(matches!(
             result,
-            Err(ArgumentError::TypeSizeMismatch { expected, actual })
-            if expected == size_of::<i64>() && actual == size_of::<i32>()
+            Err(ArgumentError::TypeMismatch {
+                expect: _,
+                actual: _
+            })
         ));
     }
 
     #[test]
-    fn value_type_mismatch_align() {
-        #[allow(dead_code)]
-        #[repr(align(32))]
-        #[derive(Debug)]
-        struct AlignedData(u32);
+    fn test_from_mut_slice_downcast_ref() {
+        let mut orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
 
+        let argument = Argument::from_mut_slice(orig_value.as_mut_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_ref::<i32>();
+        println!("result:    {:?}", result);
+
+        assert!(matches!(result, Err(ArgumentError::TypeIsNotScalar)));
+    }
+
+    #[test]
+    fn test_from_mut_slice_downcast_mut() {
+        let mut orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
+
+        let mut argument =
+            Argument::from_mut_slice(orig_value.as_mut_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut::<i32>() };
+        println!("result:    {:?}", result);
+
+        assert!(matches!(result, Err(ArgumentError::TypeIsNotScalar)));
+    }
+
+    #[test]
+    fn test_from_mut_slice_downcast_slice() {
+        let mut orig_value = [1, 2, 3, 4];
+        println!("value:     {:?}", orig_value);
+
+        let argument = Argument::from_mut_slice(orig_value.as_mut_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = argument.downcast_slice::<i32>();
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(orig_value.as_slice()));
+    }
+
+    #[test]
+    fn test_from_mut_slice_downcast_mut_slice() {
+        let mut orig_value = [1, 2, 3, 4];
+        let value_mut = unsafe { &mut *ptr::from_mut(orig_value.as_mut_slice()) };
+
+        println!("value:     {:?}", orig_value);
+
+        let mut argument =
+            Argument::from_mut_slice(orig_value.as_mut_slice(), ArgumentFlag::default());
+        println!("argument:  {:#?}", argument);
+
+        let result = unsafe { argument.downcast_mut_slice::<i32>() };
+        println!("result:    {:?}", result);
+
+        assert_eq!(result, Ok(value_mut));
+    }
+
+    #[test]
+    fn test_type_mismatch() {
         let value = AlignedData(100);
         println!("value:    {:?}", value);
 
-        let argument = Argument::with_ref(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
+        let argument = Argument::from_value(value, ArgumentFlag::ARG_IN);
+        println!("argument: {:#?}", argument);
 
-        let result = argument.try_ref::<[u32; 8]>();
+        let result = argument.downcast::<u32>();
         println!("result:   {:?}", result);
 
         assert!(matches!(
             result,
-            Err(ArgumentError::TypeAlignMismatch { expected, actual })
-            if expected == align_of::<u32>() && actual == 32
+            Err(ArgumentError::TypeMismatch {
+                expect: _,
+                actual: _
+            })
         ));
     }
 
     #[test]
-    fn value_mut_success() {
-        let mut value = Point { x: 10, y: 20 };
+    fn test_size_mismatch() {
+        let value = AlignedData(100);
         println!("value:    {:?}", value);
 
-        let mut argument = Argument::with_ref_mut(&mut value, ArgumentFlag::ARG_OUT);
-        println!("argument: {:?}", argument);
+        let mut argument = Argument::from_value(value, ArgumentFlag::ARG_IN);
+        println!("argument: {:#?}", argument);
 
-        let value_mut_ref = argument.try_ref_mut::<Point>().unwrap();
-        value_mut_ref.x = 99;
+        argument.meta.size = 8;
 
-        assert_eq!(argument.flag(), ArgumentFlag::ARG_OUT);
-        assert_eq!(value.x, 99);
-    }
-
-    #[test]
-    fn value_mut_on_immutable_fails() {
-        let value = Point { x: 10, y: 20 };
-        println!("value:    {:?}", value);
-
-        let mut argument = Argument::with_ref(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let result = argument.try_ref_mut::<Point>();
-        println!("result:   {:?}", result);
-
-        assert_eq!(result.unwrap_err(), ArgumentError::NonMutableData);
-    }
-
-    #[test]
-    fn u16_slice_success() {
-        let value = [1u16, 2, 3, 4, 5];
-        println!("value:    {:?}", value);
-
-        let argument = Argument::with_slice(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let slice_ref = argument.try_slice::<u16>().unwrap();
-        assert_eq!(slice_ref, &value[..]);
-    }
-
-    #[test]
-    fn i32_slice_success() {
-        let value = [1i32, 2, 3, 4, 5];
-        println!("value:    {:?}", value);
-
-        let argument = Argument::with_slice(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let slice_ref = argument.try_slice::<i32>().unwrap();
-        assert_eq!(slice_ref, &value[..]);
-    }
-
-    #[test]
-    fn f64_slice_success() {
-        let value = [1.1, 2.2, 3.3, 4.4, 5.5];
-        println!("value:    {:?}", value);
-
-        let argument = Argument::with_slice(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let slice_ref = argument.try_slice::<f64>().unwrap();
-        assert_eq!(slice_ref, &value[..]);
-    }
-
-    #[test]
-    fn slice_empty_success() {
-        let value: &[i32] = &[];
-        println!("value:    {:?}", value);
-
-        let argument = Argument::with_slice(value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let slice_ref = argument.try_slice::<i32>().unwrap();
-        assert_eq!(slice_ref.len(), 0);
-    }
-
-    #[test]
-    fn slice_type_mismatch() {
-        let value = [1i32, 2, 3, 4, 5];
-        println!("value:    {:?}", value);
-
-        let argument = Argument::with_slice(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let result = argument.try_slice::<u8>();
+        let result = argument.downcast::<AlignedData>();
         println!("result:   {:?}", result);
 
         assert!(matches!(
             result,
-            Err(ArgumentError::TypeSizeMismatch { expected, .. })
-            if expected == size_of::<u8>()
+            Err(ArgumentError::TypeSizeMismatch {
+                expect: _,
+                actual: _
+            })
         ));
     }
 
     #[test]
-    fn slice_mut_success() {
-        let mut value = [1i32, 2, 3, 4, 5];
+    fn test_align_mismatch() {
+        let value = AlignedData(100);
         println!("value:    {:?}", value);
 
-        let mut argument = Argument::with_slice_mut(&mut value, ArgumentFlag::ARG_OUT);
-        println!("argument: {:?}", argument);
+        let mut argument = Argument::from_ref(&value, ArgumentFlag::ARG_IN);
+        println!("argument: {:#?}", argument);
 
-        let slice_mut_ref = argument.try_slice_mut::<i32>().unwrap();
-        slice_mut_ref[0] = 100;
+        argument.meta.align = 8;
 
-        assert_eq!(value[0], 100);
-    }
-
-    #[test]
-    fn slice_mut_on_immutable_fails() {
-        let value = [1i32, 2, 3, 4, 5];
-        println!("value:    {:?}", value);
-
-        let mut argument = Argument::with_slice(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let result = argument.try_slice_mut::<i32>();
+        let result = argument.downcast::<AlignedData>();
         println!("result:   {:?}", result);
 
-        assert_eq!(result.unwrap_err(), ArgumentError::NonMutableData);
-    }
-
-    #[test]
-    fn access_slice_as_value() {
-        let value = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
-        println!("value:    {:?}", value);
-
-        let argument = Argument::with_slice(&value, ArgumentFlag::ARG_IN);
-        println!("argument: {:?}", argument);
-
-        let value_ref = argument.try_ref::<Point>().unwrap();
-        assert_eq!(*value_ref, value[0]);
+        assert!(matches!(
+            result,
+            Err(ArgumentError::TypeAlignMismatch {
+                expect: _,
+                actual: _
+            })
+        ));
     }
 }

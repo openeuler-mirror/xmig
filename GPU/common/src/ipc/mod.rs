@@ -114,17 +114,17 @@ mod tests {
 
                 match request.method_id() {
                     method_id::ADD_U64 => {
-                        let lhs = *request.args()[0]
-                            .try_ref::<u64>()
+                        let lhs = request.args()[0]
+                            .downcast::<u64>()
                             .expect("Invalid argument type");
-                        let rhs = *request.args()[1]
-                            .try_ref::<u64>()
+                        let rhs = request.args()[1]
+                            .downcast::<u64>()
                             .expect("Invalid argument type");
 
                         let result = lhs + rhs;
                         let response = Response::with_request(
                             &request,
-                            Argument::with_ref(&result, ArgumentFlag::default()),
+                            Argument::from_ref(&result, ArgumentFlag::default()),
                         );
                         debug!(
                             "[Server] Sending response: request_id={}, method_id={}",
@@ -171,22 +171,22 @@ mod tests {
                 let request = Request::with_args(
                     method_id::ADD_U64,
                     vec![
-                        Argument::with_ref(&value, ArgumentFlag::ARG_IN),
-                        Argument::with_ref(&i, ArgumentFlag::ARG_IN),
+                        Argument::from_ref(&value, ArgumentFlag::ARG_IN),
+                        Argument::from_ref(&i, ArgumentFlag::ARG_IN),
                     ],
                 );
                 let response = client.invoke(&request).expect("Invoke failed");
 
                 let ret_val = response
                     .ret_value()
-                    .try_ref::<u64>()
+                    .downcast::<u64>()
                     .expect("Invalid argument type");
                 debug!(
                     "[Client] Result 'server::add_u64({}, {})' is {}",
                     value, i, ret_val
                 );
 
-                value = *ret_val;
+                value = ret_val;
             }
         }
 
@@ -196,7 +196,7 @@ mod tests {
             let response = client.invoke(&request).expect("Invoke failed");
             let ret_val = response
                 .ret_value()
-                .try_ref::<()>()
+                .downcast::<()>()
                 .expect("Invalid argument type");
             debug!("[Client] Result 'server::shutdown()' is {:?}", ret_val);
         }
