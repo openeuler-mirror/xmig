@@ -4,6 +4,8 @@ members = [
     "common",
     "proxy",
     "server",
+    "cudax",
+    "cudax-sys",
 ]
 
 [profile.release]

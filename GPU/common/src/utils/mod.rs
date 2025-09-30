@@ -12,14 +12,4 @@
  * See the Mulan PSL v2 for more details.
  */
 
-pub mod types {
-    pub mod journal {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/xgpu.types.journal.v1.rs"));
-        }
-    }
-}
-
-pub mod ipc;
-pub mod sys;
-pub mod utils;
+pub mod api_name;
