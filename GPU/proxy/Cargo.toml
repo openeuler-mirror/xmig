@@ -7,4 +7,11 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-cudarc = { version = "0.17.3", features = ["cuda-version-from-build-system"] }
+xgpu-common = { path = "../common" }
+cudax = { path = "../cudax" }
+libc = { version = "0.2" }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
+lazy_static = "1.4.0"
+ctor = "0.2"
+parking_lot = "0.12.4"
