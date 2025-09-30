@@ -31,11 +31,8 @@ const INLINED_DATA_ALIGN: usize = 16;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ArgumentError {
-    #[error("Argument type mismatch (expect: {expect}, actual: {actual})")]
-    TypeMismatch {
-        expect: &'static str,
-        actual: &'static str,
-    },
+    #[error("Argument type mismatch")]
+    TypeMismatch,
 
     #[error("Argument type size mismatch (expect: {expect}, actual: {actual})")]
     TypeSizeMismatch { expect: usize, actual: usize },
@@ -82,7 +79,6 @@ enum ArgumentKind {
 struct ArgumentMetadata {
     kind: ArgumentKind,
     type_id: TypeId,
-    type_name: &'static str,
     type_size: usize,
     type_align: usize,
     len: usize,
@@ -91,7 +87,7 @@ struct ArgumentMetadata {
 impl Debug for ArgumentMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArgumentMetadata")
-            .field("type_name", &self.type_name)
+            .field("type_id", &self.type_id)
             .field("type_size", &self.type_size)
             .field("type_align", &self.type_align)
             .field("len", &self.len)
@@ -147,8 +143,8 @@ pub struct Argument<'a> {
 
 impl Argument<'_> {
     #[inline]
-    pub const fn type_name(&self) -> &'static str {
-        self.meta.type_name
+    pub const fn type_id(&self) -> TypeId {
+        self.meta.type_id
     }
 
     #[inline]
@@ -192,7 +188,6 @@ impl Argument<'_> {
     pub fn from_value<T: Copy + 'static>(value: T, flag: ArgumentFlag) -> Argument<'static> {
         let meta = ArgumentMetadata {
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             kind: ArgumentKind::Scalar,
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
@@ -253,7 +248,6 @@ impl Argument<'_> {
         let meta = ArgumentMetadata {
             kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
             len: 1,
@@ -292,7 +286,6 @@ impl Argument<'_> {
         let meta = ArgumentMetadata {
             kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
             len: 1,
@@ -318,7 +311,6 @@ impl<'a> Argument<'a> {
         let meta = ArgumentMetadata {
             kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
             len: 1,
@@ -333,7 +325,6 @@ impl<'a> Argument<'a> {
         let meta = ArgumentMetadata {
             kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
             len: 1,
@@ -348,7 +339,6 @@ impl<'a> Argument<'a> {
         let meta = ArgumentMetadata {
             kind: ArgumentKind::Slice,
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
             len: value.len(),
@@ -365,7 +355,6 @@ impl<'a> Argument<'a> {
         let meta = ArgumentMetadata {
             kind: ArgumentKind::Slice,
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             type_size: size_of::<T>(),
             type_align: align_of::<T>(),
             len: value.len(),
@@ -383,10 +372,7 @@ impl Argument<'_> {
         expected_kind: ArgumentKind,
     ) -> Result<(), ArgumentError> {
         if self.meta.type_id != TypeId::of::<T>() {
-            return Err(ArgumentError::TypeMismatch {
-                expect: self.meta.type_name,
-                actual: type_name::<T>(),
-            });
+            return Err(ArgumentError::TypeMismatch);
         }
 
         match (self.meta.kind, expected_kind) {
@@ -540,18 +526,20 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument
         let mut argument = unsafe { *reader.read_ref::<Argument>()? };
 
-        if !matches!(argument.value, ArgumentValue::Val(_)) {
-            // Read argument value
-            let data_ptr =
-                unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
-            let value = ArgumentValue::Ref(
-                ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
-                PhantomData,
-            );
-
-            // Update argument value
-            argument.value = value;
+        if matches!(argument.value, ArgumentValue::Val(_)) {
+            return Ok(argument);
         }
+
+        // Read argument value
+        let data_ptr =
+            unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
+        let value = ArgumentValue::Ref(
+            ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
+            PhantomData,
+        );
+
+        // Update argument value
+        argument.value = value;
 
         Ok(argument)
     }
@@ -560,18 +548,20 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument metadata
         let mut argument = unsafe { *reader.read_ref::<Argument>()? };
 
-        if !matches!(argument.value, ArgumentValue::Val(_)) {
-            // Read argument value
-            let data_ptr =
-                unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
-            let value = ArgumentValue::Mut(
-                ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
-                PhantomData,
-            );
-
-            // Update argument value
-            argument.value = value;
+        if matches!(argument.value, ArgumentValue::Val(_)) {
+            return Ok(argument);
         }
+
+        // Read argument value
+        let data_ptr =
+            unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
+        let value = ArgumentValue::Mut(
+            ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
+            PhantomData,
+        );
+
+        // Update argument value
+        argument.value = value;
 
         Ok(argument)
     }
@@ -981,13 +971,7 @@ mod tests {
         let result = argument.downcast::<&[i32]>();
         println!("result:    {:?}", result);
 
-        assert!(matches!(
-            result,
-            Err(ArgumentError::TypeMismatch {
-                expect: _,
-                actual: _
-            })
-        ));
+        assert!(matches!(result, Err(ArgumentError::TypeMismatch)));
     }
 
     #[test]
@@ -1061,13 +1045,7 @@ mod tests {
         let result = argument.downcast::<u32>();
         println!("result:   {:?}", result);
 
-        assert!(matches!(
-            result,
-            Err(ArgumentError::TypeMismatch {
-                expect: _,
-                actual: _
-            })
-        ));
+        assert!(matches!(result, Err(ArgumentError::TypeMismatch)));
     }
 
     #[test]
