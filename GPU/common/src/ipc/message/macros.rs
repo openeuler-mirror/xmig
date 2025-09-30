@@ -207,7 +207,7 @@ mod tests {
         println!("");
 
         // &mut [T]
-        let mut arg_mut_slice = arg!(ref(data_vec.as_mut_slice()), flag(ARG_OUT));
+        let arg_mut_slice = arg!(ref(data_vec.as_mut_slice()), flag(ARG_OUT));
         println!("arg!(ref(...): {:#?}", arg_mut_slice);
         let slice = unsafe { arg_mut_slice.downcast_mut_slice::<u8>().unwrap() };
         slice[1] = 25;
@@ -225,7 +225,7 @@ mod tests {
         println!("");
 
         // *mut T
-        let mut arg_mut_ptr = unsafe { arg!(ptr(mut_ptr)) };
+        let arg_mut_ptr = unsafe { arg!(ptr(mut_ptr)) };
         println!("arg!(ptr(...)): {:#?}", arg_mut_ptr);
         let ptr_back = unsafe { arg_mut_ptr.downcast_mut::<i64>().unwrap() };
         *ptr_back = 200;
