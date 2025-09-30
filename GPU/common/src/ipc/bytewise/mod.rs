@@ -12,25 +12,24 @@
  * See the Mulan PSL v2 for more details.
  */
 
+use core::ptr;
+
 use thiserror::Error;
 
 /// Errors that can occur during bitwise read or write operations.
 #[derive(Debug, Error)]
 pub enum BytewiseError {
     #[error("Insufficient buffer capacity (required: {required}, capacity: {capacity})")]
-    BufferTooSmall { required: usize, capacity: usize },
+    InsufficientBuffer { required: usize, capacity: usize },
 
     #[error("Alignment must be power of two (align: {align})")]
     InvalidAlignment { align: usize },
 
-    #[error("Cannot align data to {align} bytes")]
-    AlignmentError { align: usize },
+    #[error("Memory address cannot satisfy {align}-byte alignment")]
+    IntrinsicMisalignment { align: usize },
 
-    #[error("Attempted to access null pointer")]
-    NullPointer,
-
-    #[error("Source pointer overlaps with the destination buffer")]
-    MemoryOverlap,
+    #[error("Illegal overlapping copy operation")]
+    IllegalOverlappingCopy,
 }
 
 /// Provides a way to read raw, aligned data from a byte buffer.
@@ -61,18 +60,22 @@ pub trait BytewiseReader<'a> {
     /// - `align`: The required alignment for the data's starting address within the buffer.
     ///
     /// # Returns
-    /// - `Ok(*const u8)`: On success, an immutable raw pointer to the start of the aligned data.
+    /// - `Ok(NonNull<u8>)`: On success, an immutable raw pointer to the start of the aligned data.
     /// - `Err(BytewiseError)`: On failure, contains an error detailing the cause.
     ///
     /// # Safety
-    /// This function is `unsafe` because it returns a raw pointer (`*const u8`) whose
+    /// This function is `unsafe` because it returns a raw pointer (`NonNull<u8>`) whose
     /// lifetime is not tracked by the compiler.
     ///
     /// To avoid undefined behavior, the caller **must** uphold the following contract:
     /// - The `size` and `align` parameters **must** accurately describe the data being read.
     /// - The returned pointer **must** be cast to the correct type before being dereferenced.
     /// - The returned pointer **must not** be used after the reader's lifetime ends.
-    unsafe fn read_ptr(&mut self, size: usize, align: usize) -> Result<*const u8, BytewiseError>;
+    unsafe fn read_raw(
+        &mut self,
+        size: usize,
+        align: usize,
+    ) -> Result<ptr::NonNull<u8>, BytewiseError>;
 
     /// Reads a typed value from the buffer and returns an immutable reference to it.
     ///
@@ -87,27 +90,7 @@ pub trait BytewiseReader<'a> {
     ///
     /// To avoid undefined behavior, the caller **must** uphold the following contract:
     /// - The bytes at the current read position **must** represent for type `T`.
-    unsafe fn read_ref<T>(&mut self) -> Result<&'a T, BytewiseError>;
-
-    /// Reads a raw memory slice from the buffer and returns a mutable pointer to it.
-    ///
-    /// This is the mutable counterpart to `read_ptr`. It allows for in-place
-    /// modification of the buffer's contents via the returned pointer.
-    ///
-    /// # Returns
-    /// - `Ok((usize, *mut u8))`: On success, a mutable raw pointer to the start of the aligned data.
-    /// - `Err(BytewiseError)`: On failure, contains an error detailing the cause.
-    ///
-    /// # Safety
-    /// This function is `unsafe` because it returns a raw mutable pointer and transfers
-    /// the safety responsibilities of `read_ptr` to its caller.
-    ///
-    /// To avoid undefined behavior, the caller **must** uphold the following contract:
-    /// - The `size` and `align` parameters **must** accurately describe the data being read.
-    /// - The returned pointer **must** be cast to the correct type before being dereferenced.
-    /// - The returned pointer **must not** be used after the reader's lifetime ends.
-    /// - The returned pointer **must not** violate Rust's aliasing rules for any writes.
-    unsafe fn read_mut_ptr(&mut self, size: usize, align: usize) -> Result<*mut u8, BytewiseError>;
+    unsafe fn read_ref<T: Copy>(&mut self) -> Result<&'a T, BytewiseError>;
 
     /// Reads a typed value from the buffer and returns a mutable reference to it.
     ///
@@ -126,7 +109,7 @@ pub trait BytewiseReader<'a> {
     /// - The bytes at the current read position **must** represent for type `T`.
     /// - No other pointers or references to this memory location may exist for the
     ///   lifetime of the returned `&mut T`, upholding Rust's aliasing rules.
-    unsafe fn read_mut<T>(&mut self) -> Result<&'a mut T, BytewiseError>;
+    unsafe fn read_mut<T: Copy>(&mut self) -> Result<&'a mut T, BytewiseError>;
 }
 
 /// Provides a way to write raw, aligned data into a byte buffer.
@@ -160,36 +143,16 @@ pub trait BytewiseWriter {
     /// on the caller to guarantee the validity of the memory it describes.
     ///
     /// To avoid undefined behavior, the caller **must** uphold the following contract:
-    /// - The pointer `ptr` **must** be valid for reads of `size` bytes.
-    /// - The data pointed to by `ptr` **must** be properly aligned for `align`.
-    /// - The lifetime of the data pointed to by `ptr` **must** be valid for the entire call.
-    unsafe fn write_raw_ptr(
+    /// - The data pointed by `ptr` **must** be valid for byte-level copy operations.
+    /// - The data pointed by `ptr` **must** be valid for reads of `size` bytes.
+    /// - The data pointed by `ptr` **must** be properly aligned to `align` bytes.
+    /// - The data pointed by `ptr` **must** remain accessible for the duration of the operation.
+    unsafe fn write_raw(
         &mut self,
-        ptr: *const u8,
+        ptr: ptr::NonNull<u8>,
         size: usize,
         align: usize,
     ) -> Result<(), BytewiseError>;
-
-    /// Writes data from a pointer of type `T` into the buffer.
-    ///
-    /// This function infers the size and alignment from the type `T`.
-    ///
-    /// # Parameters
-    /// - `ptr`: A pointer to the data to be written.
-    ///
-    /// # Returns
-    /// - `Ok(())`: On success, returns nothing.
-    /// - `Err(BytewiseError)`: On failure, contains an error detailing the cause (e.g., insufficient space).
-    ///
-    /// # Safety
-    /// This function is `unsafe` because it operates on a pointer `ptr` and relies
-    /// on the caller to guarantee its validity.
-    ///
-    /// To avoid undefined behavior, the caller **must** uphold the following contract:
-    /// - The pointer `ptr` **must** point to a memory location that contains a
-    ///   valid and properly aligned instance of type `T`.
-    /// - The lifetime of the data pointed to by `ptr` **must** be valid for the entire call.
-    unsafe fn write_ptr<T>(&mut self, ptr: *const T) -> Result<(), BytewiseError>;
 
     /// Writes a typed value from a reference into the buffer.
     ///
@@ -202,13 +165,7 @@ pub trait BytewiseWriter {
     /// # Returns
     /// - `Ok(())`: On success, returns nothing.
     /// - `Err(BytewiseError)`: On failure, contains an error detailing the cause (e.g., insufficient space).
-    ///
-    /// # Safety
-    /// This function is `unsafe` because it performs a byte-wise copy of `T`.
-    ///
-    /// To avoid undefined behavior, the caller **must** uphold the following contract:
-    /// - The type `T` **must** be safe to be copied byte-for-byte.
-    unsafe fn write_ref<T>(&mut self, value: &T) -> Result<(), BytewiseError>;
+    fn write_ref<T: Copy>(&mut self, value: &T) -> Result<(), BytewiseError>;
 }
 
 /// A trait for types that can be serialized into a byte-oriented writer.
