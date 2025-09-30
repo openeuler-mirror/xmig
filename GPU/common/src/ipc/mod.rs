@@ -48,14 +48,14 @@ mod tests {
         static INIT_LOGGER: Once = Once::new();
 
         INIT_LOGGER.call_once(|| {
-            tracing_subscriber::fmt()
+            let _ = tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::TRACE)
                 .with_thread_ids(true)
                 .with_thread_names(false)
                 .with_file(false)
                 .with_target(false)
                 .with_writer(std::io::stdout)
-                .init();
+                .try_init();
         });
     }
 
@@ -96,10 +96,10 @@ mod tests {
         let addr = unique_shmem_addr();
 
         let mut server = Server::create(&transport, &addr).unwrap();
-        debug!("{:?}", server);
+        debug!("{:#?}", server);
 
         let mut client = Client::connect(&transport, &addr).unwrap();
-        debug!("{:?}", client);
+        debug!("{:#?}", client);
 
         let server_thread = std::thread::spawn(move || {
             debug!("[Server] Thread started");
