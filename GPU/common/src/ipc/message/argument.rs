@@ -617,12 +617,10 @@ impl BytewiseReadOwned for Argument<'_> {
         }
 
         // Read argument value
+        // TODO: This `read_raw` call requires argument value impl `Copy` trait
         let data_ptr =
-            unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
-        let value = ArgumentValue::Ref(
-            ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
-            PhantomData,
-        );
+            unsafe { reader.read_raw(argument.meta.type_size, argument.meta.type_align)? };
+        let value = ArgumentValue::Ref(data_ptr, PhantomData);
 
         // Update argument value
         argument.value = value;
@@ -634,17 +632,17 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument metadata
         let mut argument = unsafe { *reader.read_ref::<Argument>()? };
 
+        // Inlined data was already read from the buffer
         if matches!(argument.value, ArgumentValue::Val(_)) {
             return Ok(argument);
         }
 
         // Read argument value
-        let data_ptr =
-            unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
-        let value = ArgumentValue::Mut(
-            ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
-            PhantomData,
-        );
+        let data_ptr = unsafe {
+            // TODO: `read_raw` call requires argument value impl `Copy` trait
+            reader.read_raw(argument.meta.type_size, argument.meta.type_align)?
+        };
+        let value = ArgumentValue::Mut(data_ptr, PhantomData);
 
         // Update argument value
         argument.value = value;
@@ -656,18 +654,20 @@ impl BytewiseReadOwned for Argument<'_> {
 impl BytewiseWrite for Argument<'_> {
     fn write_to<W: BytewiseWriter>(&self, writer: &mut W) -> Result<(), BytewiseError> {
         // Write argument metadata
-        unsafe {
-            writer.write_ref(self)?;
-        }
+        writer.write_ref(self)?;
 
         // Write argument value
         match self.value {
-            ArgumentValue::Val(inline_bytes) => unsafe { writer.write_ref(&inline_bytes)? },
+            ArgumentValue::Val(_) => {
+                // Inlined data was already written to the buffer
+            }
             ArgumentValue::Ref(ptr, _) => unsafe {
-                writer.write_raw_ptr(ptr.as_ptr(), self.total_size(), self.type_align())?;
+                // TODO: `write_raw` requires argument value impl `Copy` trait
+                writer.write_raw(ptr, self.total_size(), self.type_align())?;
             },
             ArgumentValue::Mut(ptr, _) => unsafe {
-                writer.write_raw_ptr(ptr.as_ptr(), self.total_size(), self.type_align())?;
+                // TODO: `write_raw` requires argument value impl `Copy` trait
+                writer.write_raw(ptr, self.total_size(), self.type_align())?;
             },
         }
 

@@ -24,7 +24,7 @@ impl BytewiseRead for RequestMetadata {
 
 impl BytewiseWrite for RequestMetadata {
     fn write_to<W: BytewiseWriter>(&self, writer: &mut W) -> Result<(), BytewiseError> {
-        unsafe { writer.write_ref(self) }
+        writer.write_ref(self)
     }
 }
 

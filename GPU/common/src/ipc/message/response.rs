@@ -38,7 +38,7 @@ impl BytewiseRead for ResponseMetadata {
 
 impl BytewiseWrite for ResponseMetadata {
     fn write_to<W: BytewiseWriter>(&self, writer: &mut W) -> Result<(), BytewiseError> {
-        unsafe { writer.write_ref(self) }
+        writer.write_ref(self)
     }
 }
 
