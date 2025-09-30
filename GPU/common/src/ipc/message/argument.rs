@@ -78,23 +78,52 @@ enum ArgumentKind {
     Slice,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct ArgumentMetadata {
+    kind: ArgumentKind,
     type_id: TypeId,
     type_name: &'static str,
-    kind: ArgumentKind,
-    size: usize,
-    align: usize,
-    count: usize,
+    type_size: usize,
+    type_align: usize,
+    len: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl Debug for ArgumentMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArgumentMetadata")
+            .field("type_name", &self.type_name)
+            .field("type_size", &self.type_size)
+            .field("type_align", &self.type_align)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
 #[repr(align(16))]
 struct InlineBytes([u8; INLINED_DATA_SIZE]);
 
+impl Debug for InlineBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const PREVIEW_LEN: usize = 4;
+
+        write!(f, "[")?;
+        for (i, &byte) in self.0.iter().take(PREVIEW_LEN).enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "0x{:02x}", byte)?;
+        }
+        if self.0.len() > PREVIEW_LEN {
+            write!(f, ", ...")?;
+        }
+        write!(f, "]")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ArgumentValue<'a> {
-    Inlined(InlineBytes),
+    Val(InlineBytes),
     Ref(ptr::NonNull<u8>, PhantomData<&'a ()>),
     Mut(ptr::NonNull<u8>, PhantomData<&'a mut ()>),
 }
@@ -102,9 +131,9 @@ enum ArgumentValue<'a> {
 impl Debug for ArgumentValue<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Inlined(_) => f.debug_tuple("Inlined").finish_non_exhaustive(),
-            Self::Ref(ptr, _) => f.debug_tuple("Borrowed").field(ptr).finish(),
-            Self::Mut(ptr, _) => f.debug_tuple("MutBorrowed").field(ptr).finish(),
+            Self::Val(inline_bytes) => f.debug_struct("Val").field("data", inline_bytes).finish(),
+            Self::Ref(ptr, _) => f.debug_struct("Ref").field("ptr", ptr).finish(),
+            Self::Mut(ptr, _) => f.debug_struct("Mut").field("ptr", ptr).finish(),
         }
     }
 }
@@ -118,28 +147,33 @@ pub struct Argument<'a> {
 
 impl Argument<'_> {
     #[inline]
-    pub const fn type_id(&self) -> TypeId {
-        self.meta.type_id
-    }
-
-    #[inline]
     pub const fn type_name(&self) -> &'static str {
         self.meta.type_name
     }
 
     #[inline]
-    pub const fn size(&self) -> usize {
-        self.meta.size.saturating_mul(self.meta.count)
+    pub const fn type_size(&self) -> usize {
+        self.meta.type_size
     }
 
     #[inline]
-    pub const fn align(&self) -> usize {
-        self.meta.align
+    pub const fn type_align(&self) -> usize {
+        self.meta.type_align
+    }
+
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.meta.len
+    }
+
+    #[inline]
+    pub const fn total_size(&self) -> usize {
+        self.meta.type_size.saturating_mul(self.meta.len)
     }
 
     #[inline]
     pub const fn is_empty(&self) -> bool {
-        self.size() == 0
+        self.meta.type_size == 0 || self.meta.len == 0
     }
 
     #[inline]
@@ -160,27 +194,29 @@ impl Argument<'_> {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
             kind: ArgumentKind::Scalar,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: 1,
         };
-        if meta.size > INLINED_DATA_SIZE {
+        if meta.type_size > INLINED_DATA_SIZE {
             panic!(
-                "Type '{}' size {} exceeds 16-byte limit",
+                "Type '{}' size {} exceeds {}-byte limit",
                 type_name::<T>(),
-                meta.size
+                meta.type_size,
+                INLINED_DATA_SIZE,
             );
         }
-        if meta.align > INLINED_DATA_ALIGN {
+        if meta.type_align > INLINED_DATA_ALIGN {
             panic!(
-                "Type '{}' alignment {} exceeds 16-byte limit",
+                "Type '{}' alignment {} exceeds {}-byte limit",
                 type_name::<T>(),
-                meta.align
+                meta.type_align,
+                INLINED_DATA_SIZE,
             );
         }
 
         // For ZST, uses dangling pointer to save memory
-        if meta.size == 0 {
+        if meta.type_size == 0 {
             let value = ArgumentValue::Mut(ptr::NonNull::dangling(), PhantomData);
             return Argument { meta, value, flag };
         }
@@ -190,10 +226,10 @@ impl Argument<'_> {
             ptr::copy_nonoverlapping(
                 ptr::from_ref(&value).cast(),
                 bytes.0.as_mut_ptr(),
-                meta.size,
+                meta.type_size,
             );
         }
-        let value = ArgumentValue::Inlined(bytes);
+        let value = ArgumentValue::Val(bytes);
 
         Argument { meta, value, flag }
     }
@@ -215,17 +251,17 @@ impl Argument<'_> {
     #[inline]
     pub unsafe fn from_ptr<'a, T: 'static>(ptr: *const T, flag: ArgumentFlag) -> Argument<'a> {
         let meta = ArgumentMetadata {
+            kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            kind: ArgumentKind::Scalar,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: 1,
         };
         let value = ArgumentValue::Ref(
             {
                 let ptr = ptr::NonNull::new(ptr.cast_mut().cast()).expect("Invalid null pointer");
-                if meta.size != 0 && ptr == ptr::NonNull::dangling() {
+                if meta.type_size != 0 && ptr == ptr::NonNull::dangling() {
                     panic!("Invalid dangling pointer");
                 }
                 ptr
@@ -254,17 +290,17 @@ impl Argument<'_> {
     #[inline]
     pub unsafe fn from_mut_ptr<'a, T: 'static>(ptr: *mut T, flag: ArgumentFlag) -> Argument<'a> {
         let meta = ArgumentMetadata {
+            kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            kind: ArgumentKind::Scalar,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: 1,
         };
         let value = ArgumentValue::Mut(
             {
                 let ptr = ptr::NonNull::new(ptr.cast()).expect("Invalid null pointer");
-                if meta.size != 0 && ptr == ptr::NonNull::dangling() {
+                if meta.type_size != 0 && ptr == ptr::NonNull::dangling() {
                     panic!("Invalid dangling pointer");
                 }
                 ptr
@@ -280,12 +316,12 @@ impl<'a> Argument<'a> {
     #[inline]
     pub fn from_ref<T: 'static>(value: &'a T, flag: ArgumentFlag) -> Self {
         let meta = ArgumentMetadata {
+            kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            kind: ArgumentKind::Scalar,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: 1,
         };
         let value = ArgumentValue::Ref(ptr::NonNull::from(value).cast(), PhantomData);
 
@@ -295,12 +331,12 @@ impl<'a> Argument<'a> {
     #[inline]
     pub fn from_mut<T: 'static>(value: &'a mut T, flag: ArgumentFlag) -> Self {
         let meta = ArgumentMetadata {
+            kind: ArgumentKind::Scalar,
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            kind: ArgumentKind::Scalar,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: 1,
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: 1,
         };
         let value = ArgumentValue::Mut(ptr::NonNull::from(value).cast(), PhantomData);
 
@@ -310,12 +346,12 @@ impl<'a> Argument<'a> {
     #[inline]
     pub fn from_slice<T: 'static>(value: &'a [T], flag: ArgumentFlag) -> Self {
         let meta = ArgumentMetadata {
+            kind: ArgumentKind::Slice,
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            kind: ArgumentKind::Slice,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: value.len(),
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: value.len(),
         };
         let ptr =
             ptr::NonNull::new(value.as_ptr().cast_mut().cast()).unwrap_or(ptr::NonNull::dangling());
@@ -327,12 +363,12 @@ impl<'a> Argument<'a> {
     #[inline]
     pub fn from_mut_slice<T: 'static>(value: &'a mut [T], flag: ArgumentFlag) -> Self {
         let meta = ArgumentMetadata {
+            kind: ArgumentKind::Slice,
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
-            kind: ArgumentKind::Slice,
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            count: value.len(),
+            type_size: size_of::<T>(),
+            type_align: align_of::<T>(),
+            len: value.len(),
         };
         let ptr = ptr::NonNull::new(value.as_mut_ptr().cast()).unwrap_or(ptr::NonNull::dangling());
         let value = ArgumentValue::Mut(ptr, PhantomData);
@@ -364,15 +400,15 @@ impl Argument<'_> {
         }
 
         if size_of::<T>() > 0 {
-            if self.meta.size != size_of::<T>() {
+            if self.meta.type_size != size_of::<T>() {
                 return Err(ArgumentError::TypeSizeMismatch {
-                    expect: self.meta.size,
+                    expect: self.meta.type_size,
                     actual: size_of::<T>(),
                 });
             }
-            if self.meta.align != align_of::<T>() {
+            if self.meta.type_align != align_of::<T>() {
                 return Err(ArgumentError::TypeAlignMismatch {
-                    expect: self.meta.align,
+                    expect: self.meta.type_align,
                     actual: align_of::<T>(),
                 });
             }
@@ -384,7 +420,7 @@ impl Argument<'_> {
     #[inline]
     fn get_ptr(&self) -> *const u8 {
         match &self.value {
-            ArgumentValue::Inlined(bytes) => bytes.0.as_ptr(),
+            ArgumentValue::Val(bytes) => bytes.0.as_ptr(),
             ArgumentValue::Ref(ptr, _) => ptr.as_ptr(),
             ArgumentValue::Mut(ptr, _) => ptr.as_ptr(),
         }
@@ -393,7 +429,7 @@ impl Argument<'_> {
     #[inline]
     fn get_mut_ptr(&mut self) -> Result<*mut u8, ArgumentError> {
         match &mut self.value {
-            ArgumentValue::Inlined(bytes) => Ok(bytes.0.as_mut_ptr()),
+            ArgumentValue::Val(bytes) => Ok(bytes.0.as_mut_ptr()),
             ArgumentValue::Mut(ptr, _) => Ok(ptr.as_ptr()),
             ArgumentValue::Ref(_, _) => Err(ArgumentError::IllegalMutation),
         }
@@ -466,7 +502,7 @@ impl<'a> Argument<'a> {
             return Err(ArgumentError::UnalignedAccess);
         }
 
-        Ok(unsafe { slice::from_raw_parts(ptr, self.meta.count) })
+        Ok(unsafe { slice::from_raw_parts(ptr, self.meta.len) })
     }
 
     /// Attempts to downcast the argument to a mutable slice of type `T`.
@@ -495,7 +531,7 @@ impl<'a> Argument<'a> {
             return Err(ArgumentError::UnalignedAccess);
         }
 
-        Ok(unsafe { slice::from_raw_parts_mut(ptr, self.meta.count) })
+        Ok(unsafe { slice::from_raw_parts_mut(ptr, self.meta.len) })
     }
 }
 
@@ -504,9 +540,10 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument
         let mut argument = unsafe { *reader.read_ref::<Argument>()? };
 
-        if !matches!(argument.value, ArgumentValue::Inlined(_)) {
+        if !matches!(argument.value, ArgumentValue::Val(_)) {
             // Read argument value
-            let data_ptr = unsafe { reader.read_ptr(argument.meta.size, argument.meta.align)? };
+            let data_ptr =
+                unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
             let value = ArgumentValue::Ref(
                 ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
                 PhantomData,
@@ -523,9 +560,10 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument metadata
         let mut argument = unsafe { *reader.read_ref::<Argument>()? };
 
-        if !matches!(argument.value, ArgumentValue::Inlined(_)) {
+        if !matches!(argument.value, ArgumentValue::Val(_)) {
             // Read argument value
-            let data_ptr = unsafe { reader.read_ptr(argument.meta.size, argument.meta.align)? };
+            let data_ptr =
+                unsafe { reader.read_ptr(argument.meta.type_size, argument.meta.type_align)? };
             let value = ArgumentValue::Mut(
                 ptr::NonNull::new(data_ptr.cast_mut()).ok_or(BytewiseError::NullPointer)?,
                 PhantomData,
@@ -548,12 +586,12 @@ impl BytewiseWrite for Argument<'_> {
 
         // Write argument value
         match self.value {
-            ArgumentValue::Inlined(inline_bytes) => unsafe { writer.write_ref(&inline_bytes)? },
+            ArgumentValue::Val(inline_bytes) => unsafe { writer.write_ref(&inline_bytes)? },
             ArgumentValue::Ref(ptr, _) => unsafe {
-                writer.write_raw_ptr(ptr.as_ptr(), self.size(), self.align())?;
+                writer.write_raw_ptr(ptr.as_ptr(), self.total_size(), self.type_align())?;
             },
             ArgumentValue::Mut(ptr, _) => unsafe {
-                writer.write_raw_ptr(ptr.as_ptr(), self.size(), self.align())?;
+                writer.write_raw_ptr(ptr.as_ptr(), self.total_size(), self.type_align())?;
             },
         }
 
@@ -1040,7 +1078,7 @@ mod tests {
         let mut argument = Argument::from_value(value, ArgumentFlag::ARG_IN);
         println!("argument: {:#?}", argument);
 
-        argument.meta.size = 8;
+        argument.meta.type_size = 8;
 
         let result = argument.downcast::<AlignedData>();
         println!("result:   {:?}", result);
@@ -1062,7 +1100,7 @@ mod tests {
         let mut argument = Argument::from_ref(&value, ArgumentFlag::ARG_IN);
         println!("argument: {:#?}", argument);
 
-        argument.meta.align = 8;
+        argument.meta.type_align = 8;
 
         let result = argument.downcast::<AlignedData>();
         println!("result:   {:?}", result);
