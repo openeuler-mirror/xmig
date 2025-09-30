@@ -51,6 +51,9 @@ pub enum ArgumentError {
 
     #[error("Attempted to access non mutable data as mutable")]
     IllegalMutation,
+
+    #[error("Attempted to reference inlined data")]
+    IllegalBorrowOfInlined,
 }
 
 bitflags! {
@@ -423,15 +426,59 @@ impl Argument<'_> {
 }
 
 impl<'a> Argument<'a> {
+    /// Attempts to downcast the argument to a value of type `T` by copying.
+    ///
+    /// This function succeeds if the argument's type matches `T` and the data
+    /// is properly aligned. It works for both inlined values (`Val`) and
+    /// referenced values (`Ref`, `Mut`).
     #[inline]
     pub fn downcast<T: Copy + 'static>(&self) -> Result<T, ArgumentError> {
-        self.downcast_ref().copied()
-    }
+        // This implementation is now independent of `downcast_ref` because
+        // `downcast_ref` must reject inlined values (`Val`) due to lifetime constraints,
+        // whereas this function (which copies the value) should support them.
 
-    #[inline]
-    pub fn downcast_ref<'s: 'a, T: 'static>(&'s self) -> Result<&'s T, ArgumentError> {
         if size_of::<T>() == 0 {
             self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+            // SAFETY: A ZST can be safely created from zeroed bytes.
+            return Ok(unsafe { std::mem::zeroed() });
+        }
+
+        self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+
+        let ptr = self.get_ptr().cast::<T>();
+        if !ptr.is_aligned() {
+            return Err(ArgumentError::UnalignedAccess);
+        }
+
+        // SAFETY:
+        // 1. `validate_metadata` ensures the `TypeId`, size, and align match `T`.
+        // 2. `get_ptr` provides a valid pointer to the start of the data,
+        //    whether it's inlined (`Val`) or external (`Ref`/`Mut`).
+        // 3. We have confirmed the pointer is aligned for `T`.
+        // 4. `T: Copy`, so reading the bytes to create a new value is safe.
+        // Therefore, dereferencing the pointer to perform a copy is safe.
+        Ok(unsafe { *ptr })
+    }
+
+    /// Attempts to downcast the argument to a reference of type `&'a T`.
+    ///
+    /// This will fail if the argument's value is stored inline (`ArgumentValue::Val`),
+    /// because the lifetime of inlined data is tied to the `Argument` struct itself,
+    /// not the longer lifetime `'a`.
+    #[inline]
+    pub fn downcast_ref<T: 'static>(&self) -> Result<&'a T, ArgumentError> {
+        // The lifetime 'a is tied to the Argument struct, not the borrow of `&self`.
+        // If the value is stored inline (`Val`), its lifetime is bound to `&self`,
+        // which might be shorter than 'a. Returning a reference with lifetime 'a
+        // would be unsound. Therefore, we must forbid it.
+        if let ArgumentValue::Val(_) = self.value {
+            return Err(ArgumentError::IllegalBorrowOfInlined);
+        }
+
+        if size_of::<T>() == 0 {
+            self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+            // SAFETY: A reference to a Zero-Sized Type (ZST) is always safe
+            // as it points to nothing and has a static lifetime conceptually.
             return Ok(unsafe { ptr::NonNull::dangling().as_ref() });
         }
 
@@ -442,17 +489,23 @@ impl<'a> Argument<'a> {
             return Err(ArgumentError::UnalignedAccess);
         }
 
+        // SAFETY:
+        // The constructor functions (`from_ref`, `from_ptr`, etc.) guarantee that
+        // for `Ref` and `Mut` variants, the pointer is valid for reads for the
+        // entire lifetime 'a. We have explicitly checked and returned an error
+        // for the `Val` variant, ensuring this code path is only taken for
+        // pointer-based arguments whose data lives for 'a.
         Ok(unsafe { &*ptr })
     }
 
-    /// Attempts to downcast the argument to a mutable reference of type `T`.
+    /// Attempts to downcast the argument to a mutable reference of type `&'a mut T`.
     ///
     /// # Safety
     ///
-    /// This function is `unsafe` because it can create a mutable reference `&mut T`
+    /// This function is `unsafe` because it can create a mutable reference `&'a mut T`
     /// from an internal raw pointer, bypassing the borrow checker.
     ///
-    /// The caller MUST ensure that for the entire lifetime `'s` of the returned
+    /// The caller MUST ensure that for the entire lifetime `'a` of the returned
     /// mutable reference, **NO other references (mutable or shared)** to the same
     /// data exist. This is a strict requirement of Rust's aliasing model.
     ///
@@ -461,11 +514,18 @@ impl<'a> Argument<'a> {
     ///
     /// Violating this requirement is immediate **undefined behavior**.
     #[inline]
-    pub unsafe fn downcast_mut<'s: 'a, T: 'static>(
-        &'s mut self,
-    ) -> Result<&'s mut T, ArgumentError> {
+    pub unsafe fn downcast_mut<T: 'static>(&mut self) -> Result<&'a mut T, ArgumentError> {
+        // The lifetime 'a is tied to the Argument struct, not the borrow of `&mut self`.
+        // If the value is stored inline (`Val`), its lifetime is bound to `&mut self`,
+        // which might be shorter than 'a. Returning a reference with lifetime 'a
+        // would be unsound. Therefore, we must forbid it.
+        if let ArgumentValue::Val(_) = self.value {
+            return Err(ArgumentError::IllegalBorrowOfInlined);
+        }
+
         if size_of::<T>() == 0 {
             self.validate_metadata::<T>(ArgumentKind::Scalar)?;
+            // SAFETY: A mutable reference to a ZST is always safe as it points to nothing.
             return Ok(unsafe { ptr::NonNull::dangling().as_mut() });
         }
 
@@ -476,11 +536,24 @@ impl<'a> Argument<'a> {
             return Err(ArgumentError::UnalignedAccess);
         }
 
+        // SAFETY: The caller must uphold the safety contract described above.
+        // We have also checked that the value is not inlined, so the pointer
+        // corresponds to data with lifetime 'a, and `get_mut_ptr` ensures
+        // the original argument was created from a mutable source.
         Ok(unsafe { &mut *ptr })
     }
 
+    /// Attempts to downcast the argument to a slice of type `&'a [T]`.
     #[inline]
-    pub fn downcast_slice<'s: 'a, T: 'static>(&self) -> Result<&'s [T], ArgumentError> {
+    pub fn downcast_slice<T: 'static>(&self) -> Result<&'a [T], ArgumentError> {
+        // A slice argument is always created via `from_slice`, which uses
+        // `ArgumentValue::Ref`. It can never be `ArgumentValue::Val`.
+        // Therefore, we don't strictly need the `if let Val` check here,
+        // but it adds robustness against future changes.
+        if let ArgumentValue::Val(_) = self.value {
+            return Err(ArgumentError::IllegalBorrowOfInlined);
+        }
+
         self.validate_metadata::<T>(ArgumentKind::Slice)?;
 
         let ptr = self.get_ptr().cast::<T>();
@@ -488,28 +561,37 @@ impl<'a> Argument<'a> {
             return Err(ArgumentError::UnalignedAccess);
         }
 
+        // SAFETY:
+        // The `from_slice` constructor ensures the pointer is valid for `len` elements
+        // for the entire lifetime 'a. We have also ensured that this is not an
+        // inlined value, so the lifetime 'a is appropriate.
         Ok(unsafe { slice::from_raw_parts(ptr, self.meta.len) })
     }
 
-    /// Attempts to downcast the argument to a mutable slice of type `T`.
+    /// Attempts to downcast the argument to a mutable slice of type `&'a mut [T]`.
     ///
     /// # Safety
     ///
-    /// This function is `unsafe` because it can create a mutable slice `&mut [T]`
+    /// This function is `unsafe` because it can create a mutable slice `&'a mut [T]`
     /// from an internal raw pointer, bypassing the borrow checker.
     ///
-    // The caller MUST ensure that for the entire lifetime `'s` of the returned
-    // mutable slice, **NO other references (mutable or shared)** to the same
-    // data exist. This is a strict requirement of Rust's aliasing model.
+    /// The caller MUST ensure that for the entire lifetime `'a` of the returned
+    /// mutable slice, **NO other references (mutable or shared)** to the same
+    /// data exist. This is a strict requirement of Rust's aliasing model.
     ///
     /// This includes any shared references that may have been previously created by
     /// calling methods like `downcast_slice` on this **same** `Argument` instance.
     ///
     /// Violating this requirement is immediate **undefined behavior**.
     #[inline]
-    pub unsafe fn downcast_mut_slice<'s: 'a, T: 'static>(
-        &'s mut self,
-    ) -> Result<&'s mut [T], ArgumentError> {
+    pub unsafe fn downcast_mut_slice<T: 'static>(&mut self) -> Result<&'a mut [T], ArgumentError> {
+        // A mutable slice argument is always created via `from_mut_slice`, which uses
+        // `ArgumentValue::Mut`. It can never be `ArgumentValue::Val`.
+        // This check adds robustness.
+        if let ArgumentValue::Val(_) = self.value {
+            return Err(ArgumentError::IllegalBorrowOfInlined);
+        }
+
         self.validate_metadata::<T>(ArgumentKind::Slice)?;
 
         let ptr = self.get_mut_ptr()?.cast::<T>();
@@ -517,6 +599,10 @@ impl<'a> Argument<'a> {
             return Err(ArgumentError::UnalignedAccess);
         }
 
+        // SAFETY: The caller must uphold the safety contract described above.
+        // The `from_mut_slice` constructor ensures the pointer is valid for reads
+        // and writes for `len` elements for the entire lifetime 'a. `get_mut_ptr`
+        // ensures the source was mutable.
         Ok(unsafe { slice::from_raw_parts_mut(ptr, self.meta.len) })
     }
 }
@@ -707,12 +793,12 @@ mod tests {
         let result = argument.downcast_ref::<Point>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Ok(&orig_value));
+        assert_eq!(result, Err(ArgumentError::IllegalBorrowOfInlined));
     }
 
     #[test]
     fn test_from_value_downcast_mut() {
-        let mut orig_value = Point { x: 10, y: 20 };
+        let orig_value = Point { x: 10, y: 20 };
         println!("value:     {:?}", orig_value);
 
         let mut argument = Argument::from_value(orig_value, ArgumentFlag::default());
@@ -721,7 +807,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut::<Point>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Ok(&mut orig_value));
+        assert_eq!(result, Err(ArgumentError::IllegalBorrowOfInlined));
     }
 
     #[test]
@@ -735,7 +821,7 @@ mod tests {
         let result = argument.downcast_slice::<i32>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+        assert_eq!(result, Err(ArgumentError::IllegalBorrowOfInlined));
     }
 
     #[test]
@@ -749,7 +835,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut_slice::<i32>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::TypeIsNotSlice));
+        assert_eq!(result, Err(ArgumentError::IllegalBorrowOfInlined));
     }
 
     #[test]
@@ -1006,6 +1092,8 @@ mod tests {
     #[test]
     fn test_from_mut_slice_downcast_slice() {
         let mut orig_value = [1, 2, 3, 4];
+        let value_slice = unsafe { &*ptr::from_ref(orig_value.as_slice()) };
+
         println!("value:     {:?}", orig_value);
 
         let argument = Argument::from_mut_slice(orig_value.as_mut_slice(), ArgumentFlag::default());
@@ -1014,13 +1102,13 @@ mod tests {
         let result = argument.downcast_slice::<i32>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Ok(orig_value.as_slice()));
+        assert_eq!(result, Ok(value_slice));
     }
 
     #[test]
     fn test_from_mut_slice_downcast_mut_slice() {
         let mut orig_value = [1, 2, 3, 4];
-        let value_mut = unsafe { &mut *ptr::from_mut(orig_value.as_mut_slice()) };
+        let value_slice = unsafe { &mut *ptr::from_mut(orig_value.as_mut_slice()) };
 
         println!("value:     {:?}", orig_value);
 
@@ -1031,7 +1119,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut_slice::<i32>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Ok(value_mut));
+        assert_eq!(result, Ok(value_slice));
     }
 
     #[test]
@@ -1039,10 +1127,10 @@ mod tests {
         let value = AlignedData(100);
         println!("value:    {:?}", value);
 
-        let argument = Argument::from_value(value, ArgumentFlag::ARG_IN);
+        let argument = Argument::from_ref(&value, ArgumentFlag::ARG_IN);
         println!("argument: {:#?}", argument);
 
-        let result = argument.downcast::<u32>();
+        let result = argument.downcast_ref::<u32>();
         println!("result:   {:?}", result);
 
         assert!(matches!(result, Err(ArgumentError::TypeMismatch)));
@@ -1053,12 +1141,12 @@ mod tests {
         let value = AlignedData(100);
         println!("value:    {:?}", value);
 
-        let mut argument = Argument::from_value(value, ArgumentFlag::ARG_IN);
+        let mut argument = Argument::from_ref(&value, ArgumentFlag::ARG_IN);
         println!("argument: {:#?}", argument);
 
         argument.meta.type_size = 8;
 
-        let result = argument.downcast::<AlignedData>();
+        let result = argument.downcast_ref::<AlignedData>();
         println!("result:   {:?}", result);
 
         assert!(matches!(
@@ -1080,7 +1168,7 @@ mod tests {
 
         argument.meta.type_align = 8;
 
-        let result = argument.downcast::<AlignedData>();
+        let result = argument.downcast_ref::<AlignedData>();
         println!("result:   {:?}", result);
 
         assert!(matches!(

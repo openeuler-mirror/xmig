@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(arg_val_no_flag.type_size(), size_of::<i32>());
         assert_eq!(arg_val_no_flag.type_align(), align_of::<i32>());
         assert_eq!(arg_val_no_flag.flag(), ArgumentFlag::default());
-        assert_eq!(arg_val_no_flag.downcast_ref::<i32>().unwrap(), &42);
+        assert_eq!(arg_val_no_flag.downcast::<i32>().unwrap(), 42);
         println!("");
 
         // multiple flags
@@ -210,7 +210,7 @@ mod tests {
         let mut arg_mut_slice = arg!(ref(data_vec.as_mut_slice()), flag(ARG_OUT));
         println!("arg!(ref(...): {:#?}", arg_mut_slice);
         let slice = unsafe { arg_mut_slice.downcast_mut_slice::<u8>().unwrap() };
-        slice[1] = 25; // 修改数据
+        slice[1] = 25;
         assert_eq!(data_vec, vec![10, 25, 30]);
         println!("");
 
@@ -228,7 +228,7 @@ mod tests {
         let mut arg_mut_ptr = unsafe { arg!(ptr(mut_ptr)) };
         println!("arg!(ptr(...)): {:#?}", arg_mut_ptr);
         let ptr_back = unsafe { arg_mut_ptr.downcast_mut::<i64>().unwrap() };
-        *ptr_back = 200; // 修改数据
+        *ptr_back = 200;
         assert_eq!(mutable_scalar, 200);
     }
 
