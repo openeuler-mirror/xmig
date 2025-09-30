@@ -142,6 +142,24 @@ macro_rules! arg {
     };
 }
 
+#[macro_export]
+macro_rules! request {
+    // --- no argument --
+    ($method_id:expr) => {
+        $crate::ipc::message::Request::empty($method_id)
+    };
+
+    // --- multiple arguments --
+    ($method_id:expr, [ $($arg:expr),* $(,)? ]) => {
+        $crate::ipc::message::Request::with_args(
+            $method_id,
+            // The magic is here: we just use the standard vec! macro
+            // to collect all the provided expressions.
+            vec![$($arg),*]
+        )
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +230,28 @@ mod tests {
         let ptr_back = unsafe { arg_mut_ptr.downcast_mut::<i64>().unwrap() };
         *ptr_back = 200; // 修改数据
         assert_eq!(mutable_scalar, 200);
+    }
+
+    #[test]
+    fn test_request_macro() {
+        let my_data = [1u8, 2, 3, 4];
+        let mut output_buffer = [0u8; 4];
+
+        let empty_req = request!(102);
+        assert_eq!(empty_req.method_id, 102);
+        assert!(empty_req.arg_list.is_empty());
+
+        let req = request!(
+            101,
+            [
+                arg!(val(42i32)),
+                arg!(ref(&my_data), flag(ARG_OUT, ARG_VIRT)),
+                unsafe { arg!(ptr(output_buffer.as_mut_ptr())) }
+            ]
+        );
+
+        println!("Request: {:#?}", req);
+        assert_eq!(req.method_id, 101);
+        assert_eq!(req.arg_list.len(), 3);
     }
 }
