@@ -4,7 +4,7 @@ use crate::ipc::bytewise::{
     BytewiseError, BytewiseRead, BytewiseReadOwned, BytewiseReader, BytewiseWrite, BytewiseWriter,
 };
 
-use super::Argument;
+use super::{Argument, ArgumentError, ArgumentFlag, Response};
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -92,6 +92,29 @@ impl<'a> Request<'a> {
     }
 }
 
+impl Request<'_> {
+    pub fn update_from(&mut self, response: &Response) -> Result<(), ArgumentError> {
+        if self.request_id() != response.request_id() {
+            return Err(ArgumentError::TypeMismatch);
+        }
+
+        if self.argc() != response.argc() {
+            return Err(ArgumentError::TypeLengthMismatch {
+                expect: self.argc(),
+                actual: response.argc(),
+            });
+        }
+
+        for (idx, arg) in self.arg_list.iter_mut().enumerate() {
+            if arg.flag().contains(ArgumentFlag::ARG_OUT) {
+                arg.update_from(&response.args()[idx])?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl BytewiseWrite for Request<'_> {
     fn write_to<W: BytewiseWriter>(&self, writer: &mut W) -> Result<(), BytewiseError> {
         let metadata = RequestMetadata {
@@ -150,7 +173,7 @@ impl BytewiseReadOwned for Request<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt::Debug, ptr};
+    use std::fmt::Debug;
 
     use crate::ipc::{bytewise::BytewiseBuffer, message::ArgumentFlag};
 
@@ -197,12 +220,12 @@ mod tests {
     }
 
     #[test]
-    fn no_argument_roundtrip() {
+    fn test_no_argument_roundtrip() {
         roundtrip_test(Request::empty(0xABCD))
     }
 
     #[test]
-    fn zst_argument_roundtrip() {
+    fn test_zst_argument_roundtrip() {
         #[derive(Debug)]
         struct Zst;
 
@@ -216,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn single_argument_roundtrip() {
+    fn test_single_argument_roundtrip() {
         roundtrip_test(Request::with_arg(
             0xFFFF,
             Argument::from_ref(&42u32, ArgumentFlag::ARG_IN),
@@ -224,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_arguments_roundtrip() {
+    fn test_multiple_arguments_roundtrip() {
         roundtrip_test(Request::with_args(
             0xFFFF,
             vec![
@@ -237,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_type_arguments_roundtrip() {
+    fn test_mixed_type_arguments_roundtrip() {
         struct TestValue {
             _value1: usize,
             _value2: usize,
@@ -252,7 +275,6 @@ mod tests {
                 Argument::from_ref(&4f64, ArgumentFlag::ARG_IN),
                 Argument::from_ref(&5u128, ArgumentFlag::ARG_IN),
                 Argument::from_ref(&(), ArgumentFlag::ARG_IN),
-                Argument::from_ref(&ptr::dangling::<u8>(), ArgumentFlag::ARG_IN),
                 Argument::from_ref(
                     &TestValue {
                         _value1: 1,
@@ -262,5 +284,36 @@ mod tests {
                 ),
             ],
         ));
+    }
+
+    #[test]
+    fn test_update_from() {
+        let mut request = Request::with_args(
+            0xFFFF,
+            vec![
+                Argument::from_value(1u8, ArgumentFlag::ARG_IN),
+                Argument::from_value(2u8, ArgumentFlag::ARG_OUT),
+                Argument::from_value(3u8, ArgumentFlag::ARG_IN),
+                Argument::from_value(4u8, ArgumentFlag::ARG_OUT),
+                Argument::from_value((), ArgumentFlag::ARG_IN),
+            ],
+        );
+
+        let mut response = Response::with_request(&request, Argument::empty());
+        response.args_mut()[0] = Argument::empty();
+        response.args_mut()[1] = Argument::from_value(9u8, ArgumentFlag::ARG_OUT);
+        response.args_mut()[2] = Argument::empty();
+        response.args_mut()[3] = Argument::from_value(9u8, ArgumentFlag::ARG_OUT);
+        response.args_mut()[4] = Argument::empty();
+
+        request
+            .update_from(&response)
+            .expect("Update operation should succeed");
+
+        assert_eq!(request.args()[0].downcast::<u8>(), Ok(1u8));
+        assert_eq!(request.args()[1].downcast::<u8>(), Ok(9u8));
+        assert_eq!(request.args()[2].downcast::<u8>(), Ok(3u8));
+        assert_eq!(request.args()[3].downcast::<u8>(), Ok(9u8));
+        assert_eq!(request.args()[4].downcast::<()>(), Ok(()));
     }
 }

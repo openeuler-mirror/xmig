@@ -12,15 +12,11 @@
  * See the Mulan PSL v2 for more details.
  */
 
-use crate::ipc::{
-    bytewise::{
-        BytewiseError, BytewiseRead, BytewiseReadOwned, BytewiseReader, BytewiseWrite,
-        BytewiseWriter,
-    },
-    message::ArgumentFlag,
+use crate::ipc::bytewise::{
+    BytewiseError, BytewiseRead, BytewiseReadOwned, BytewiseReader, BytewiseWrite, BytewiseWriter,
 };
 
-use super::{Argument, Request};
+use super::{Argument, ArgumentFlag, Request};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
