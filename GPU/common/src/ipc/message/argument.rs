@@ -40,6 +40,9 @@ pub enum ArgumentError {
     #[error("Argument type alignment mismatch (expect: {expect}, actual: {actual})")]
     TypeAlignMismatch { expect: usize, actual: usize },
 
+    #[error("Argument type length mismatch (expect: {expect}, actual: {actual})")]
+    TypeLengthMismatch { expect: usize, actual: usize },
+
     #[error("Attempted to downcast non-scalar argument to scalar")]
     NotScalar,
 
@@ -564,6 +567,62 @@ impl<'a> Argument<'a> {
         // and writes for `len` elements for the entire lifetime 'a. `get_mut_ptr`
         // ensures the source was mutable.
         Ok(unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), self.meta.len) })
+    }
+}
+
+impl Argument<'_> {
+    pub fn update_from(&mut self, source: &Argument<'_>) -> Result<(), ArgumentError> {
+        if self.meta.type_id != source.meta.type_id {
+            return Err(ArgumentError::TypeMismatch);
+        }
+
+        if self.meta.type_size != source.meta.type_size {
+            return Err(ArgumentError::TypeSizeMismatch {
+                expect: self.meta.type_size,
+                actual: source.meta.type_size,
+            });
+        }
+
+        if self.meta.type_align != source.meta.type_align {
+            return Err(ArgumentError::TypeAlignMismatch {
+                expect: self.meta.type_align,
+                actual: source.meta.type_align,
+            });
+        }
+
+        if self.meta.len != source.meta.len {
+            return Err(ArgumentError::TypeLengthMismatch {
+                expect: self.meta.len,
+                actual: source.meta.len,
+            });
+        }
+
+        let total_size = self.total_size();
+        if total_size == 0 {
+            return Ok(());
+        }
+
+        let (src_ptr, dst_ptr) = match (&source.value, &mut self.value) {
+            (ArgumentValue::Val(src_bytes), ArgumentValue::Val(dst_bytes)) => {
+                assert!(total_size <= INLINED_DATA_SIZE);
+                (src_bytes.0.as_ptr(), dst_bytes.0.as_mut_ptr())
+            }
+            (ArgumentValue::Ref(src_ptr, _), ArgumentValue::Mut(dst_ptr, _))
+            | (ArgumentValue::Mut(src_ptr, _), ArgumentValue::Mut(dst_ptr, _)) => {
+                (src_ptr.as_ptr().cast_const(), dst_ptr.as_ptr())
+            }
+            (_, ArgumentValue::Ref(..)) => {
+                return Err(ArgumentError::IllegalMutation);
+            }
+            _ => {
+                return Err(ArgumentError::TypeMismatch);
+            }
+        };
+        unsafe {
+            ptr::copy_nonoverlapping(src_ptr, dst_ptr, total_size);
+        }
+
+        Ok(())
     }
 }
 
@@ -1134,5 +1193,59 @@ mod tests {
                 actual: _
             })
         ));
+    }
+
+    #[test]
+    fn test_val_update_from() {
+        let src_value: i32 = -1;
+        let dst_value: i32 = 0;
+
+        let src_arg = Argument::from_value(src_value, ArgumentFlag::default());
+        let mut dst_arg = Argument::from_value(dst_value, ArgumentFlag::default());
+
+        dst_arg
+            .update_from(&src_arg)
+            .expect("Update operation should succeed");
+
+        let updated_value = dst_arg.downcast::<i32>().expect("Data type mismatched");
+        println!("Before update: dst_value = {:?}", dst_value);
+        println!("After update:  dst_value = {:?}", updated_value);
+
+        assert_eq!(updated_value, -1, "Data was not copied correctly");
+    }
+
+    #[test]
+    fn test_mut_update_from() {
+        let src_data: [u32; 2] = [12345, 67890];
+        let mut dst_data: [u32; 2] = [0, 0];
+        println!("Before update: dst_data = {:?}", dst_data);
+
+        let src_arg = Argument::from_slice(&src_data, ArgumentFlag::default());
+        let mut dst_arg = Argument::from_mut_slice(&mut dst_data, ArgumentFlag::default());
+
+        dst_arg
+            .update_from(&src_arg)
+            .expect("Update operation should succeed");
+
+        println!("After update:  dst_data = {:?}", dst_data);
+        assert_eq!(dst_data, [12345, 67890], "Data was not copied correctly");
+    }
+
+    #[test]
+    fn test_ref_update_from() {
+        let src_data: [u32; 2] = [12345, 67890];
+        let dst_data: [u32; 2] = [99, 99];
+
+        let src_arg = Argument::from_slice(&src_data, ArgumentFlag::default());
+        let mut dst_arg = Argument::from_slice(&dst_data, ArgumentFlag::default());
+
+        let result = dst_arg.update_from(&src_arg);
+        assert_eq!(
+            result,
+            Err(ArgumentError::IllegalMutation),
+            "Update should fail with IllegalMutation for a Ref destination"
+        );
+        println!("Update failed as expected: {:?}", result.unwrap_err());
+        assert_eq!(dst_data, [99, 99], "Data should not be modified on failure");
     }
 }
