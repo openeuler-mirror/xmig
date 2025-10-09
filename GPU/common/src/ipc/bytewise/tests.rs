@@ -23,10 +23,10 @@ struct TestStruct {
     c: [u16; 3],
 }
 
-fn test_write<T: Debug, W: BytewiseWriter>(writer: &mut W, value: &T) {
+fn test_write<T: Debug + Copy, W: BytewiseWriter>(writer: &mut W, value: &T) {
     let old_len = writer.written_bytes();
 
-    unsafe { writer.write_ref(value).unwrap() };
+    writer.write_ref(value).unwrap();
 
     let new_len = writer.written_bytes();
     let write_len = new_len - old_len;
@@ -42,7 +42,11 @@ fn test_write<T: Debug, W: BytewiseWriter>(writer: &mut W, value: &T) {
     );
 }
 
-fn test_read<'a, T: Debug + PartialEq + 'a, R: BytewiseReader<'a>>(reader: &mut R, orig_value: &T) {
+fn test_read<'a, T, R>(reader: &mut R, orig_value: &T)
+where
+    T: Debug + Copy + PartialEq + 'a,
+    R: BytewiseReader<'a>,
+{
     let old_len = reader.read_bytes();
     let read_value = unsafe { reader.read_ref().unwrap() };
     let new_len = reader.read_bytes();
@@ -61,10 +65,11 @@ fn test_read<'a, T: Debug + PartialEq + 'a, R: BytewiseReader<'a>>(reader: &mut 
     assert_eq!(orig_value, read_value);
 }
 
-fn test_read_mut<'a, T: Debug + PartialEq + 'a, R: BytewiseReader<'a>>(
-    reader: &mut R,
-    orig_value: &T,
-) {
+fn test_read_mut<'a, T, R>(reader: &mut R, orig_value: &T)
+where
+    T: Debug + Copy + PartialEq + 'a,
+    R: BytewiseReader<'a>,
+{
     let old_len = reader.read_bytes();
     let read_value = unsafe { reader.read_mut().unwrap() };
     let new_len = reader.read_bytes();

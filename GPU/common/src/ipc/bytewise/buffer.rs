@@ -46,7 +46,7 @@ impl<B> BytewiseBuffer<B> {
     /// - `write`: The initial write position in bytes from the start of the buffer.
     ///
     /// # Returns
-    /// - `Self`: new `ByteStream` instance.
+    /// - `Self`: new `BytewiseBuffer` instance.
     pub fn with_offset(buf: B, read: usize, write: usize) -> Self {
         Self { buf, read, write }
     }
@@ -66,10 +66,14 @@ impl<'a, B: AsRef<[u8]>> BytewiseReader<'a> for BytewiseBuffer<B> {
         self.read
     }
 
-    unsafe fn read_ptr(&mut self, size: usize, align: usize) -> Result<*const u8, BytewiseError> {
+    unsafe fn read_raw(
+        &mut self,
+        size: usize,
+        align: usize,
+    ) -> Result<ptr::NonNull<u8>, BytewiseError> {
         // For zero-sized types, return a dangling pointer and consume 0 bytes.
         if size == 0 {
-            return Ok(ptr::NonNull::dangling().as_ptr());
+            return Ok(ptr::NonNull::dangling());
         }
 
         // Check alignment
@@ -78,19 +82,19 @@ impl<'a, B: AsRef<[u8]>> BytewiseReader<'a> for BytewiseBuffer<B> {
         }
 
         // Get remaining readable buffer
-        let rest_buf = self
-            .buf
-            .as_ref()
-            .get(self.read..)
-            .ok_or(BytewiseError::BufferTooSmall {
-                required: size,
-                capacity: 0,
-            })?;
+        let rest_buf =
+            self.buf
+                .as_ref()
+                .get(self.read..)
+                .ok_or(BytewiseError::InsufficientBuffer {
+                    required: size,
+                    capacity: 0,
+                })?;
 
         // Calculate padding for alignment
         let padding_size = rest_buf.as_ptr().align_offset(align);
         if padding_size == usize::MAX {
-            return Err(BytewiseError::AlignmentError { align });
+            return Err(BytewiseError::IntrinsicMisalignment { align });
         }
 
         // Calculate the total size this op requires
@@ -99,14 +103,15 @@ impl<'a, B: AsRef<[u8]>> BytewiseReader<'a> for BytewiseBuffer<B> {
         // Check if the remaining buffer is large enough
         let rest_size = rest_buf.len();
         if total_size > rest_size {
-            return Err(BytewiseError::BufferTooSmall {
+            return Err(BytewiseError::InsufficientBuffer {
                 required: total_size,
                 capacity: rest_size,
             });
         }
 
         // Calculate aligned readable data position
-        let data_ptr = rest_buf[padding_size..].as_ptr();
+        let buf_ptr = rest_buf[padding_size..].as_ptr().cast_mut();
+        let data_ptr = ptr::NonNull::new(buf_ptr).expect("Unexpected null pointer from slice");
 
         // Advance the internal offset
         self.read += total_size;
@@ -114,33 +119,26 @@ impl<'a, B: AsRef<[u8]>> BytewiseReader<'a> for BytewiseBuffer<B> {
         Ok(data_ptr)
     }
 
-    unsafe fn read_ref<T>(&mut self) -> Result<&'a T, BytewiseError> {
-        // SAFETY: The call to `unsafe fn self.read_raw_ptr` is safe because:
+    unsafe fn read_ref<T: Copy>(&mut self) -> Result<&'a T, BytewiseError> {
+        // SAFETY: This `read_raw` call is safe because:
         // - The `size` and `align` is accurately describes the data being read (compiler guarantee)
-        // - The returned pointer is casted to correct type (safety contract)
-        // - The returned pointer's lifetime follows the reader's lifetime (compiler guarantee)
+        // - The returned reference is casted to correct type (safety contract)
+        // - The returned reference lifetime follows the data lifetime (compiler guarantee)
         unsafe {
-            self.read_ptr(size_of::<T>(), align_of::<T>())
-                .map(|ptr| &*ptr.cast())
+            self.read_raw(size_of::<T>(), align_of::<T>())
+                .map(|ptr| ptr.cast().as_ref())
         }
     }
 
-    unsafe fn read_mut_ptr(&mut self, size: usize, align: usize) -> Result<*mut u8, BytewiseError> {
-        // SAFETY: The call to `unsafe fn self.read_raw_ptr` is safe because:
-        // - This function's safety contract requires its caller to uphold the safety
-        //   contract of `read_raw_ptr` (safety contract).
-        unsafe { self.read_ptr(size, align).map(|ptr| ptr.cast_mut()) }
-    }
-
-    unsafe fn read_mut<T>(&mut self) -> Result<&'a mut T, BytewiseError> {
-        // SAFETY: The call to `unsafe fn self.read_raw_mut_ptr` is safe because:
+    unsafe fn read_mut<T: Copy>(&mut self) -> Result<&'a mut T, BytewiseError> {
+        // SAFETY: This `read_raw` call is safe because:
         // - The `size` and `align` is accurately describes the data being read (compiler guarantee)
-        // - The returned pointer is casted to correct type (safety contract)
-        // - The returned pointer's lifetime follows the reader's lifetime (compiler guarantee)
-        // - The returned pointer would not violate Rust's aliasing rules (safety contract)
+        // - The returned reference is casted to correct type (safety contract)
+        // - The returned reference lifetime follows the data lifetime (compiler guarantee)
+        // - The returned reference would not violate Rust's aliasing rules (safety contract)
         unsafe {
-            self.read_mut_ptr(size_of::<T>(), align_of::<T>())
-                .map(|ptr| &mut *ptr.cast())
+            self.read_raw(size_of::<T>(), align_of::<T>())
+                .map(|ptr| ptr.cast().as_mut())
         }
     }
 }
@@ -150,20 +148,15 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
         self.write
     }
 
-    unsafe fn write_raw_ptr(
+    unsafe fn write_raw(
         &mut self,
-        ptr: *const u8,
+        ptr: ptr::NonNull<u8>,
         size: usize,
         align: usize,
     ) -> Result<(), BytewiseError> {
         // For zero-sized writes, perform a no-op and return success
         if size == 0 {
             return Ok(());
-        }
-
-        // Check pointer
-        if ptr.is_null() {
-            return Err(BytewiseError::NullPointer);
         }
 
         // Check alignment
@@ -177,7 +170,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
             self.buf
                 .as_mut()
                 .get_mut(self.write..)
-                .ok_or(BytewiseError::BufferTooSmall {
+                .ok_or(BytewiseError::InsufficientBuffer {
                     required: self.write + 1,
                     capacity: buf_len,
                 })?;
@@ -185,7 +178,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
         // Calculate padding for alignment
         let padding_size = rest_buf.as_ptr().align_offset(align);
         if padding_size == usize::MAX {
-            return Err(BytewiseError::AlignmentError { align });
+            return Err(BytewiseError::IntrinsicMisalignment { align });
         }
 
         // Calculate the total size this op requires
@@ -194,7 +187,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
         // Check if the remaining buffer is large enough
         let rest_len = rest_buf.len();
         if total_size > rest_len {
-            return Err(BytewiseError::BufferTooSmall {
+            return Err(BytewiseError::InsufficientBuffer {
                 required: self.write + total_size,
                 capacity: buf_len,
             });
@@ -202,7 +195,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
 
         // Calculate aligned writable data position
         let dst_ptr = rest_buf[padding_size..].as_mut_ptr();
-        let src_ptr = ptr;
+        let src_ptr = ptr.as_ptr().cast_const();
 
         // Enforce the `ptr::copy_nonoverlapping` requirement
         let src_start = src_ptr as usize;
@@ -210,7 +203,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
         let dst_start = dst_ptr as usize;
         let dst_end = dst_start.saturating_add(size);
         if src_start < dst_end && src_end > dst_start {
-            return Err(BytewiseError::MemoryOverlap);
+            return Err(BytewiseError::IllegalOverlappingCopy);
         }
 
         // Write data to aligned position
@@ -230,17 +223,18 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> BytewiseWriter for BytewiseBuffer<B> {
         Ok(())
     }
 
-    unsafe fn write_ptr<T>(&mut self, ptr: *const T) -> Result<(), BytewiseError> {
-        // SAFETY: The call to `unsafe fn self.write_raw_ptr` is safe because:
-        // - The type and lifetime of the data pointed to by `ptr` are guaranteed by the caller (safety contract)
-        // - The `size` and `align` arguments are correctly derived from `T` (compiler guarantee)
-        unsafe { self.write_raw_ptr(ptr.cast::<u8>(), size_of::<T>(), align_of::<T>()) }
-    }
-
-    unsafe fn write_ref<T>(&mut self, value: &T) -> Result<(), BytewiseError> {
-        // SAFETY: The call to `unsafe fn self.write_ptr` is safe because:
-        // - The type and lifetime of the pointer are guaranteed by the `&T` reference (compiler guarantee)
-        // - The byte-level validity of `T` is guaranteed by the caller (safety contract)
-        unsafe { self.write_ptr(ptr::from_ref(value)) }
+    fn write_ref<T: Copy>(&mut self, value: &T) -> Result<(), BytewiseError> {
+        // SAFETY: This `write_raw` call is safe because:
+        // - The source pointer is valid for byte-level copy (compiler guarantee)
+        // - The source data is valid for reads of `size_of::<T>()` bytes (compiler guarantee)
+        // - The source pointer is properly aligned to `align_of::<T>()` (compiler guarantee)
+        // - The source data remains accessible during operation (compiler guarantee)
+        unsafe {
+            self.write_raw(
+                ptr::NonNull::from_ref(value).cast(),
+                size_of::<T>(),
+                align_of::<T>(),
+            )
+        }
     }
 }

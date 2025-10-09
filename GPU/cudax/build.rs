@@ -26,10 +26,9 @@ fn multiarch_path() -> &'static str {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cuda_home = env::var("CUDA_HOME")
-            .unwrap_or("/usr/local/cuda".to_string());
+    let cuda_home = env::var("CUDA_HOME").unwrap_or("/usr/local/cuda".to_string());
     let cuda_home = Path::new(&cuda_home);
-    
+
     let lib_paths = [
         &cuda_home.join("lib64"),
         &cuda_home.join("lib64").join("stubs"),
@@ -40,14 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Path::new("/usr/lib64"),
         Path::new("/usr/lib/wsl/lib"),
     ];
-    let lib_names = [
-        "cublas",
-        "nccl",
-        "cudart",
-        "nvidia-ml",
-        "cuda",
-        "cublasLt",
-    ];
+    let lib_names = ["cublas", "nccl", "cudart", "nvidia-ml", "cuda", "cublasLt"];
 
     for lib in lib_names {
         let file_name = format!("lib{}.so", lib);
