@@ -15,7 +15,18 @@
 use std::{fs, env, path::{Path, PathBuf}};
 
 const CUDA_HOME: &str = "/usr/local/cuda";          // if you DO NOT have the environment variable, replace it with your own path
-const NCCL_SRC_HOME: &str = "/home/tomoki/nccl";    // if you DO NOT have the environment variable, replace it with your own path
+const NCCL_SRC_HOME: &str = "/usr/local/nccl";      // if you DO NOT have the environment variable, replace it with your own path
+
+fn multiarch_path() -> &'static str {
+    let dir = match env::consts::ARCH {
+        "x86_64" => "x86_64-linux-gnu",
+        "x86" => "i386-linux-gnu",
+        "aarch64" => "aarch64-linux-gnu",
+        _ => panic!("Unsupported architecture"),
+    };
+
+    dir
+}
 
 fn generate_single_binding(
     header: &str,               // header file
@@ -48,7 +59,7 @@ fn generate_single_binding(
             "c++".to_string(),
             format!("-std=c++17"),
             format!("-I/usr/include/c++/{}", gcc_ver),
-            format!("-I/usr/include/x86_64-linux-gnu/c++/{}", gcc_ver),
+            format!("-I/usr/include/{}/c++/{}", multiarch_path(), gcc_ver),
         ];
 
         builder = builder.clang_args(cpp_clang_args);
