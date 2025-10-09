@@ -20,44 +20,15 @@ use std::{
 };
 
 use bitflags::bitflags;
-use thiserror::Error;
 
 use crate::ipc::bytewise::{
     BytewiseError, BytewiseReadOwned, BytewiseReader, BytewiseWrite, BytewiseWriter,
 };
 
+use super::MessageError;
+
 const INLINED_DATA_SIZE: usize = 16;
 const INLINED_DATA_ALIGN: usize = 16;
-
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum ArgumentError {
-    #[error("Argument type mismatch")]
-    TypeMismatch,
-
-    #[error("Argument type size mismatch (expect: {expect}, actual: {actual})")]
-    TypeSizeMismatch { expect: usize, actual: usize },
-
-    #[error("Argument type alignment mismatch (expect: {expect}, actual: {actual})")]
-    TypeAlignMismatch { expect: usize, actual: usize },
-
-    #[error("Argument type length mismatch (expect: {expect}, actual: {actual})")]
-    TypeLengthMismatch { expect: usize, actual: usize },
-
-    #[error("Attempted to downcast non-scalar argument to scalar")]
-    NotScalar,
-
-    #[error("Attempted to downcast non-slice argument to slice")]
-    NotSlice,
-
-    #[error("Attempted to access unaligned data")]
-    UnalignedAccess,
-
-    #[error("Attempted to access non mutable data as mutable")]
-    IllegalMutation,
-
-    #[error("Attempted to reference inlined data")]
-    IllegalBorrowOfInlined,
-}
 
 bitflags! {
     #[repr(transparent)]
@@ -376,30 +347,30 @@ impl Argument<'_> {
     fn validate_metadata<T: 'static>(
         &self,
         expected_kind: ArgumentKind,
-    ) -> Result<(), ArgumentError> {
+    ) -> Result<(), MessageError> {
         if self.meta.type_id != TypeId::of::<T>() {
-            return Err(ArgumentError::TypeMismatch);
+            return Err(MessageError::ArgumentTypeMismatch);
         }
 
         match (self.meta.kind, expected_kind) {
             (ArgumentKind::Scalar, ArgumentKind::Slice) => {
-                return Err(ArgumentError::NotSlice);
+                return Err(MessageError::ArgumentIsNotSlice);
             }
             (ArgumentKind::Slice, ArgumentKind::Scalar) => {
-                return Err(ArgumentError::NotScalar);
+                return Err(MessageError::ArgumentIsNotScalar);
             }
             _ => {}
         }
 
         if size_of::<T>() > 0 {
             if self.meta.type_size != size_of::<T>() {
-                return Err(ArgumentError::TypeSizeMismatch {
+                return Err(MessageError::ArgumentTypeSizeMismatch {
                     expect: self.meta.type_size,
                     actual: size_of::<T>(),
                 });
             }
             if self.meta.type_align != align_of::<T>() {
-                return Err(ArgumentError::TypeAlignMismatch {
+                return Err(MessageError::ArgumentTypeAlignMismatch {
                     expect: self.meta.type_align,
                     actual: align_of::<T>(),
                 });
@@ -410,7 +381,7 @@ impl Argument<'_> {
     }
 
     #[inline]
-    fn inner_val_ptr<T: Copy>(&self) -> Result<ptr::NonNull<T>, ArgumentError> {
+    fn inner_val_ptr<T: Copy>(&self) -> Result<ptr::NonNull<T>, MessageError> {
         let ptr = match &self.value {
             ArgumentValue::Val(data) => ptr::NonNull::new(data.0.as_ptr().cast_mut())
                 .expect("Inlined data pointer should not be NULL")
@@ -420,37 +391,37 @@ impl Argument<'_> {
         };
 
         if !ptr.is_aligned() {
-            return Err(ArgumentError::UnalignedAccess);
+            return Err(MessageError::UnalignedAccess);
         }
 
         Ok(ptr)
     }
 
     #[inline]
-    fn inner_ref_ptr<T>(&self) -> Result<ptr::NonNull<T>, ArgumentError> {
+    fn inner_ref_ptr<T>(&self) -> Result<ptr::NonNull<T>, MessageError> {
         let ptr = match &self.value {
-            ArgumentValue::Val(_) => return Err(ArgumentError::IllegalBorrowOfInlined),
+            ArgumentValue::Val(_) => return Err(MessageError::IllegalBorrowOfInlined),
             ArgumentValue::Ref(ptr, _) => ptr.cast::<T>(),
             ArgumentValue::Mut(ptr, _) => ptr.cast::<T>(),
         };
 
         if !ptr.is_aligned() {
-            return Err(ArgumentError::UnalignedAccess);
+            return Err(MessageError::UnalignedAccess);
         }
 
         Ok(ptr)
     }
 
     #[inline]
-    fn inner_mut_ptr<T>(&self) -> Result<ptr::NonNull<T>, ArgumentError> {
+    fn inner_mut_ptr<T>(&self) -> Result<ptr::NonNull<T>, MessageError> {
         let ptr = match &self.value {
-            ArgumentValue::Val(_) => return Err(ArgumentError::IllegalBorrowOfInlined),
-            ArgumentValue::Ref(_, _) => return Err(ArgumentError::IllegalMutation),
+            ArgumentValue::Val(_) => return Err(MessageError::IllegalBorrowOfInlined),
+            ArgumentValue::Ref(_, _) => return Err(MessageError::IllegalMutation),
             ArgumentValue::Mut(ptr, _) => ptr.cast::<T>(),
         };
 
         if !ptr.is_aligned() {
-            return Err(ArgumentError::UnalignedAccess);
+            return Err(MessageError::UnalignedAccess);
         }
 
         Ok(ptr)
@@ -464,7 +435,7 @@ impl<'a> Argument<'a> {
     /// is properly aligned. It works for both inlined values (`Val`) and
     /// referenced values (`Ref`, `Mut`).
     #[inline]
-    pub fn downcast<T: Copy + 'static>(&self) -> Result<T, ArgumentError> {
+    pub fn downcast<T: Copy + 'static>(&self) -> Result<T, MessageError> {
         self.validate_metadata::<T>(ArgumentKind::Scalar)?;
 
         let ptr = self.inner_val_ptr()?;
@@ -485,7 +456,7 @@ impl<'a> Argument<'a> {
     /// because the lifetime of inlined data is tied to the `Argument` struct itself,
     /// not the longer lifetime `'a`.
     #[inline]
-    pub fn downcast_ref<T: 'static>(&self) -> Result<&'a T, ArgumentError> {
+    pub fn downcast_ref<T: 'static>(&self) -> Result<&'a T, MessageError> {
         self.validate_metadata::<T>(ArgumentKind::Scalar)?;
 
         let ptr = self.inner_ref_ptr()?;
@@ -515,7 +486,7 @@ impl<'a> Argument<'a> {
     ///
     /// Violating this requirement is immediate **undefined behavior**.
     #[inline]
-    pub unsafe fn downcast_mut<T: 'static>(&self) -> Result<&'a mut T, ArgumentError> {
+    pub unsafe fn downcast_mut<T: 'static>(&self) -> Result<&'a mut T, MessageError> {
         self.validate_metadata::<T>(ArgumentKind::Scalar)?;
 
         let mut ptr = self.inner_mut_ptr()?;
@@ -529,7 +500,7 @@ impl<'a> Argument<'a> {
 
     /// Attempts to downcast the argument to a slice of type `&'a [T]`.
     #[inline]
-    pub fn downcast_slice<T: 'static>(&self) -> Result<&'a [T], ArgumentError> {
+    pub fn downcast_slice<T: 'static>(&self) -> Result<&'a [T], MessageError> {
         self.validate_metadata::<T>(ArgumentKind::Slice)?;
 
         let ptr = self.inner_ref_ptr()?;
@@ -557,7 +528,7 @@ impl<'a> Argument<'a> {
     ///
     /// Violating this requirement is immediate **undefined behavior**.
     #[inline]
-    pub unsafe fn downcast_mut_slice<T: 'static>(&self) -> Result<&'a mut [T], ArgumentError> {
+    pub unsafe fn downcast_mut_slice<T: 'static>(&self) -> Result<&'a mut [T], MessageError> {
         self.validate_metadata::<T>(ArgumentKind::Slice)?;
 
         let ptr = self.inner_mut_ptr()?;
@@ -571,27 +542,27 @@ impl<'a> Argument<'a> {
 }
 
 impl Argument<'_> {
-    pub fn update_from(&mut self, source: &Argument<'_>) -> Result<(), ArgumentError> {
+    pub fn update_from(&mut self, source: &Argument<'_>) -> Result<(), MessageError> {
         if self.meta.type_id != source.meta.type_id {
-            return Err(ArgumentError::TypeMismatch);
+            return Err(MessageError::ArgumentTypeMismatch);
         }
 
         if self.meta.type_size != source.meta.type_size {
-            return Err(ArgumentError::TypeSizeMismatch {
+            return Err(MessageError::ArgumentTypeSizeMismatch {
                 expect: self.meta.type_size,
                 actual: source.meta.type_size,
             });
         }
 
         if self.meta.type_align != source.meta.type_align {
-            return Err(ArgumentError::TypeAlignMismatch {
+            return Err(MessageError::ArgumentTypeAlignMismatch {
                 expect: self.meta.type_align,
                 actual: source.meta.type_align,
             });
         }
 
         if self.meta.len != source.meta.len {
-            return Err(ArgumentError::TypeLengthMismatch {
+            return Err(MessageError::ArgumentTypeLengthMismatch {
                 expect: self.meta.len,
                 actual: source.meta.len,
             });
@@ -612,10 +583,10 @@ impl Argument<'_> {
                 (src_ptr.as_ptr().cast_const(), dst_ptr.as_ptr())
             }
             (_, ArgumentValue::Ref(..)) => {
-                return Err(ArgumentError::IllegalMutation);
+                return Err(MessageError::IllegalMutation);
             }
             _ => {
-                return Err(ArgumentError::TypeMismatch);
+                return Err(MessageError::ArgumentStorageMismatch);
             }
         };
         unsafe {
@@ -812,7 +783,7 @@ mod tests {
         let result = argument.downcast_ref::<Point>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::IllegalBorrowOfInlined));
+        assert_eq!(result, Err(MessageError::IllegalBorrowOfInlined));
     }
 
     #[test]
@@ -826,7 +797,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut::<Point>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::IllegalBorrowOfInlined));
+        assert_eq!(result, Err(MessageError::IllegalBorrowOfInlined));
     }
 
     #[test]
@@ -840,7 +811,7 @@ mod tests {
         let result = argument.downcast_slice::<i32>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::NotSlice));
+        assert_eq!(result, Err(MessageError::ArgumentIsNotSlice));
     }
 
     #[test]
@@ -854,7 +825,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut_slice::<i32>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::NotSlice));
+        assert_eq!(result, Err(MessageError::ArgumentIsNotSlice));
     }
 
     #[test]
@@ -896,7 +867,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut::<Point>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::IllegalMutation));
+        assert_eq!(result, Err(MessageError::IllegalMutation));
     }
 
     #[test]
@@ -910,7 +881,7 @@ mod tests {
         let result = argument.downcast_slice::<Point>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::NotSlice));
+        assert_eq!(result, Err(MessageError::ArgumentIsNotSlice));
     }
 
     #[test]
@@ -924,7 +895,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut_slice::<Point>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::NotSlice));
+        assert_eq!(result, Err(MessageError::ArgumentIsNotSlice));
     }
 
     #[test]
@@ -992,7 +963,7 @@ mod tests {
         let result = argument.downcast_slice::<Point>();
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::NotSlice));
+        assert_eq!(result, Err(MessageError::ArgumentIsNotSlice));
     }
 
     #[test]
@@ -1006,7 +977,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut_slice::<Point>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::NotSlice));
+        assert_eq!(result, Err(MessageError::ArgumentIsNotSlice));
     }
 
     #[test]
@@ -1020,7 +991,7 @@ mod tests {
         let result = argument.downcast_ref::<i32>();
         println!("result:    {:?}", result);
 
-        assert!(matches!(result, Err(ArgumentError::NotScalar)));
+        assert!(matches!(result, Err(MessageError::ArgumentIsNotScalar)));
     }
 
     #[test]
@@ -1034,7 +1005,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut::<i32>() };
         println!("result:    {:?}", result);
 
-        assert!(matches!(result, Err(ArgumentError::NotScalar)));
+        assert!(matches!(result, Err(MessageError::ArgumentIsNotScalar)));
     }
 
     #[test]
@@ -1062,7 +1033,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut_slice::<i32>() };
         println!("result:    {:?}", result);
 
-        assert_eq!(result, Err(ArgumentError::IllegalMutation));
+        assert_eq!(result, Err(MessageError::IllegalMutation));
     }
 
     #[test]
@@ -1076,7 +1047,7 @@ mod tests {
         let result = argument.downcast::<&[i32]>();
         println!("result:    {:?}", result);
 
-        assert!(matches!(result, Err(ArgumentError::TypeMismatch)));
+        assert!(matches!(result, Err(MessageError::ArgumentTypeMismatch)));
     }
 
     #[test]
@@ -1090,7 +1061,7 @@ mod tests {
         let result = argument.downcast_ref::<i32>();
         println!("result:    {:?}", result);
 
-        assert!(matches!(result, Err(ArgumentError::NotScalar)));
+        assert!(matches!(result, Err(MessageError::ArgumentIsNotScalar)));
     }
 
     #[test]
@@ -1104,7 +1075,7 @@ mod tests {
         let result = unsafe { argument.downcast_mut::<i32>() };
         println!("result:    {:?}", result);
 
-        assert!(matches!(result, Err(ArgumentError::NotScalar)));
+        assert!(matches!(result, Err(MessageError::ArgumentIsNotScalar)));
     }
 
     #[test]
@@ -1148,7 +1119,7 @@ mod tests {
         let result = argument.downcast_ref::<u32>();
         println!("result:   {:?}", result);
 
-        assert!(matches!(result, Err(ArgumentError::TypeMismatch)));
+        assert!(matches!(result, Err(MessageError::ArgumentTypeMismatch)));
     }
 
     #[test]
@@ -1166,7 +1137,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ArgumentError::TypeSizeMismatch {
+            Err(MessageError::ArgumentTypeSizeMismatch {
                 expect: _,
                 actual: _
             })
@@ -1188,7 +1159,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ArgumentError::TypeAlignMismatch {
+            Err(MessageError::ArgumentTypeAlignMismatch {
                 expect: _,
                 actual: _
             })
@@ -1242,7 +1213,7 @@ mod tests {
         let result = dst_arg.update_from(&src_arg);
         assert_eq!(
             result,
-            Err(ArgumentError::IllegalMutation),
+            Err(MessageError::IllegalMutation),
             "Update should fail with IllegalMutation for a Ref destination"
         );
         println!("Update failed as expected: {:?}", result.unwrap_err());

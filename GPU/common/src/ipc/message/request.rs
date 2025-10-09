@@ -1,10 +1,24 @@
+// SPDX-License-Identifier: Mulan PSL v2
+/*
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This software is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of Mulan PSL v2 at:
+ *         http://license.coscl.org.cn/MulanPSL2
+ *
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PSL v2 for more details.
+ */
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ipc::bytewise::{
     BytewiseError, BytewiseRead, BytewiseReadOwned, BytewiseReader, BytewiseWrite, BytewiseWriter,
 };
 
-use super::{Argument, ArgumentError, ArgumentFlag, Response};
+use super::{Argument, ArgumentFlag, MessageError, Response};
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -93,13 +107,16 @@ impl<'a> Request<'a> {
 }
 
 impl Request<'_> {
-    pub fn update_from(&mut self, response: &Response) -> Result<(), ArgumentError> {
+    pub fn update_from(&mut self, response: &Response) -> Result<(), MessageError> {
         if self.request_id() != response.request_id() {
-            return Err(ArgumentError::TypeMismatch);
+            return Err(MessageError::RequestIdMismatch {
+                expect: self.request_id(),
+                actual: response.request_id(),
+            });
         }
 
         if self.argc() != response.argc() {
-            return Err(ArgumentError::TypeLengthMismatch {
+            return Err(MessageError::ArgumentCountMismatch {
                 expect: self.argc(),
                 actual: response.argc(),
             });
