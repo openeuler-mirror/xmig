@@ -16,15 +16,15 @@ use thiserror::Error;
 
 use crate::ipc::transport::Transport;
 
-use super::{bytewise::BytewiseError, codec::FrameCodecError};
+use super::{bytewise::BytewiseError, framer::Framer};
 
 #[derive(Debug, Error)]
-pub enum IpcError<T: Transport> {
+pub enum IpcError<F: Framer, T: Transport> {
+    #[error("Framer Error: {0}")]
+    FramerError(#[source] F::Error),
+
     #[error("Transport Error: {0}")]
     TransportError(#[source] T::Error),
-
-    #[error("Codec Error: {0}")]
-    CodecError(#[from] FrameCodecError),
 
     #[error("Bytewise Error: {0}")]
     BytewiseError(#[from] BytewiseError),
