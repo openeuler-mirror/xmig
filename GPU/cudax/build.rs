@@ -17,14 +17,12 @@ use std::{env, path::Path};
 const CUDA_HOME: &str = "/usr/local/cuda";          // if you DO NOT have the environment variable, replace it with your own path
 
 fn multiarch_path() -> &'static str {
-    let dir = match env::consts::ARCH {
+    match env::consts::ARCH {
         "x86_64" => "x86_64-linux-gnu",
         "x86" => "i386-linux-gnu",
         "aarch64" => "aarch64-linux-gnu",
         _ => panic!("Unsupported architecture"),
-    };
-
-    dir
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,14 +34,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // dynamic library
     let lib_paths = [
-        &cuda_home.join("lib64"),
-        &cuda_home.join("lib64").join("stubs"),
-        &cuda_home.join("lib64"),
-        &cuda_home.join("lib64").join("stubs"),
-        &Path::new(&format!("/usr/lib/{}", multiarch_path())).to_path_buf(),
-        Path::new("/usr/lib64"),
-        Path::new("/usr/lib64"),
-        Path::new("/usr/lib/wsl/lib"),
+        cuda_home.join("lib64"),
+        cuda_home.join("lib64").join("stubs"),
+        cuda_home.join("lib64"),
+        cuda_home.join("lib64").join("stubs"),
+        Path::new(&format!("/usr/lib/{}", multiarch_path())).to_path_buf(),
+        Path::new("/usr/lib64").to_path_buf(),
+        Path::new("/usr/lib/wsl/lib").to_path_buf(),
     ];
     let lib_names = [
         "cublas",
@@ -68,7 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // static library 
     let lib_paths = [
-        &Path::new(&format!("/usr/lib/{}", multiarch_path())).to_path_buf(),
+        Path::new("/usr/lib64").to_path_buf(),
+        Path::new(&format!("/usr/lib/{}", multiarch_path())).to_path_buf(),
     ];
     let lib_names = [
         "nccl_static"
