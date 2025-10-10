@@ -18,11 +18,11 @@ use std::{
 };
 
 use crate::{
-    ipc::transport::{ReadBuf, TransportError, WriteBuf},
+    ipc::transport::{ReadBuf, WriteBuf},
     sys::futex::FutexMutexGuard,
 };
 
-use super::channel::ShmemChannel;
+use super::{channel::ShmemChannel, error::ShmemTransportError};
 
 #[derive(Debug)]
 pub struct ShmemReadBuffer<'a> {
@@ -53,12 +53,12 @@ impl<'a> ShmemReadBuffer<'a> {
 }
 
 impl ReadBuf for ShmemReadBuffer<'_> {
-    /// Consumes the specified number of bytes from the buffer, advancing the
-    /// `head` pointer and notifying waiting writers.
-    fn consume(mut self, bytes: usize) -> Result<(), TransportError> {
+    type Error = ShmemTransportError;
+
+    fn consume(mut self, bytes: usize) -> Result<(), Self::Error> {
         if bytes > self.len {
-            return Err(TransportError::ReadBufferOverflow {
-                consume: bytes,
+            return Err(ShmemTransportError::ReadOverflow {
+                attempted: bytes,
                 capacity: self.len,
             });
         }
@@ -129,12 +129,12 @@ impl<'a> ShmemWriteBuffer<'a> {
 }
 
 impl WriteBuf for ShmemWriteBuffer<'_> {
-    /// Submits the specified number of bytes to the buffer, advancing the
-    /// `tail` pointer and notifying waiting readers.
-    fn submit(mut self, bytes: usize) -> Result<(), TransportError> {
+    type Error = ShmemTransportError;
+
+    fn submit(mut self, bytes: usize) -> Result<(), Self::Error> {
         if bytes > self.len {
-            return Err(TransportError::WriteBufferOverflow {
-                submit: bytes,
+            return Err(ShmemTransportError::WriteOverflow {
+                attempted: bytes,
                 capacity: self.len,
             });
         }

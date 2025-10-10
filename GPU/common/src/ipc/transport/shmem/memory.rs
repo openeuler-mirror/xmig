@@ -19,60 +19,58 @@ use nix::errno::Errno;
 use crate::sys::{mmap::MirroredMmap, page, shmem::Shmem};
 
 #[derive(Debug)]
-pub struct MirroredShmem {
-    fd: Shmem,
-    mmap: MirroredMmap,
+pub struct ShmemRegion {
+    shmem: Shmem,
+    mapping: MirroredMmap,
 }
 
-impl MirroredShmem {
+impl ShmemRegion {
     pub fn create<S: AsRef<str>>(name: S, len: usize, reserve: usize) -> io::Result<Self> {
         let data_len = page::page_align(len);
         let resv_len = page::page_align(reserve);
         let file_len = data_len.checked_add(resv_len).ok_or(Errno::EINVAL)?;
 
-        let fd = Shmem::create(name, file_len)?;
-        let mmap = MirroredMmap::mmap_from(&fd, file_len, resv_len)?;
+        let shmem = Shmem::create(name, file_len)?;
+        let mapping = MirroredMmap::mmap_from(&shmem, file_len, resv_len)?;
 
-        Ok(Self { fd, mmap })
+        Ok(Self { shmem, mapping })
     }
 
     pub fn open<S: AsRef<str>>(name: S, reserved: usize) -> io::Result<Self> {
-        let fd = Shmem::open(name)?;
-
-        let file_len = fd.size();
         let resv_len = page::page_align(reserved);
 
-        let mmap = MirroredMmap::mmap_from(&fd, file_len, resv_len)?;
+        let shmem = Shmem::open(name)?;
+        let mapping = MirroredMmap::mmap_from(&shmem, shmem.size(), resv_len)?;
 
-        Ok(Self { fd, mmap })
+        Ok(Self { shmem, mapping })
     }
 
     #[inline]
     pub fn name(&self) -> &str {
-        self.fd.name()
+        self.shmem.name()
     }
 
     #[inline]
     pub fn is_owner(&self) -> bool {
-        self.fd.is_owner()
+        self.shmem.is_owner()
     }
 
     /// Returns a pointer to the start of the reserved region (A).
     #[inline]
     pub fn reserved_ptr(&self) -> *mut u8 {
-        self.mmap.reserved_ptr()
+        self.mapping.reserved_ptr()
     }
 
     /// Returns a pointer to the start of the main data region (B).
     #[inline]
     pub fn data_ptr(&self) -> *mut u8 {
-        self.mmap.data_ptr()
+        self.mapping.data_ptr()
     }
 
     /// Returns the length of the main data region (B).
     #[inline]
     pub fn data_len(&self) -> usize {
-        self.mmap.data_len()
+        self.mapping.data_len()
     }
 }
 
@@ -88,8 +86,8 @@ mod tests {
         const RESERVED_LEN: usize = 4096;
         const TEST_BYTE: u8 = 0xF0;
 
-        let shmem1 = MirroredShmem::create(SHM_NAME, SHMEM_LEN, RESERVED_LEN).unwrap();
-        println!("shmem1: {:#?}", shmem1.mmap);
+        let shmem1 = ShmemRegion::create(SHM_NAME, SHMEM_LEN, RESERVED_LEN).unwrap();
+        println!("shmem1: {:#?}", shmem1.mapping);
 
         assert!(shmem1.is_owner());
 
@@ -97,10 +95,10 @@ mod tests {
         let expected_file_len = page::page_align(SHMEM_LEN + expected_reserved_len);
         let expected_data_len = expected_file_len - expected_reserved_len;
 
-        assert_eq!(shmem1.mmap.reserved_len(), expected_reserved_len);
+        assert_eq!(shmem1.mapping.reserved_len(), expected_reserved_len);
         assert_eq!(shmem1.data_len(), expected_data_len);
         assert_eq!(
-            shmem1.mmap.total_len(),
+            shmem1.mapping.total_len(),
             expected_reserved_len + expected_data_len * 2
         );
 
@@ -108,8 +106,8 @@ mod tests {
             std::ptr::write_bytes(shmem1.data_ptr(), TEST_BYTE, shmem1.data_len());
         }
 
-        let shmem2 = MirroredShmem::open(SHM_NAME, RESERVED_LEN)?;
-        println!("shmem2: {:#?}", shmem2.mmap);
+        let shmem2 = ShmemRegion::open(SHM_NAME, RESERVED_LEN)?;
+        println!("shmem2: {:#?}", shmem2.mapping);
 
         assert!(!shmem2.is_owner()); // Opener is not the owner.
         assert_eq!(shmem1.name(), shmem2.name());
@@ -117,8 +115,8 @@ mod tests {
         assert_ne!(shmem1.reserved_ptr(), shmem2.reserved_ptr());
         assert_ne!(shmem1.data_ptr(), shmem2.data_ptr());
         assert_eq!(shmem1.data_len(), shmem2.data_len());
-        assert_eq!(shmem1.mmap.reserved_len(), shmem2.mmap.reserved_len());
-        assert_eq!(shmem1.mmap.total_len(), shmem2.mmap.total_len());
+        assert_eq!(shmem1.mapping.reserved_len(), shmem2.mapping.reserved_len());
+        assert_eq!(shmem1.mapping.total_len(), shmem2.mapping.total_len());
 
         let shmem1_data_slice =
             unsafe { std::slice::from_raw_parts(shmem1.data_ptr(), shmem1.data_len()) };
@@ -140,11 +138,11 @@ mod tests {
         const SHM_LEN: usize = 8192;
         const RESERVED_LEN: usize = 4096;
 
-        let shmem = MirroredShmem::create(SHM_NAME, SHM_LEN, RESERVED_LEN)?;
+        let shmem = ShmemRegion::create(SHM_NAME, SHM_LEN, RESERVED_LEN)?;
 
         let data_len = shmem.data_len();
         let data_ptr = shmem.data_ptr();
-        let mirrored_ptr = shmem.mmap.mirrored_ptr();
+        let mirrored_ptr = shmem.mapping.mirrored_ptr();
 
         // Scenario 1: Write to the data region (B) and read from the mirrored region (B')
         unsafe {
@@ -177,7 +175,7 @@ mod tests {
         const SHM_LEN: usize = 8192;
         const RESERVED_LEN: usize = 4096;
 
-        let shmem = MirroredShmem::create(SHM_NAME, SHM_LEN, RESERVED_LEN)?;
+        let shmem = ShmemRegion::create(SHM_NAME, SHM_LEN, RESERVED_LEN)?;
 
         let data_len = shmem.data_len();
         let data_ptr = shmem.data_ptr();

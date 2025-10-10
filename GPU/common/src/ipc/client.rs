@@ -3,7 +3,7 @@ use super::{
     codec::FrameCodec,
     error::IpcError,
     message::{Request, Response},
-    transport::{Endpoint, ReadBuf, Transport, TransportError, WriteBuf},
+    transport::{Endpoint, ReadBuf, Transport, WriteBuf},
 };
 
 #[derive(Debug)]
@@ -13,17 +13,22 @@ pub struct Client<T: Transport> {
 }
 
 impl<T: Transport> Client<T> {
-    pub fn connect(transport: &T, addr: &T::Address) -> Result<Self, IpcError> {
-        let endpoint2 = transport.connect(addr)?;
+    pub fn connect(transport: &T, addr: &T::Address) -> Result<Self, IpcError<T>> {
+        let endpoint = transport
+            .connect(addr)
+            .map_err(|e| IpcError::TransportError(e))?;
 
         Ok(Self {
-            endpoint: endpoint2,
+            endpoint,
             framer: FrameCodec::new(4096),
         })
     }
 
-    pub fn send_message<B: BytewiseWrite>(&mut self, message: &B) -> Result<(), IpcError> {
-        let mut write_buf = self.endpoint.write_buf()?;
+    pub fn send_message<B: BytewiseWrite>(&mut self, message: &B) -> Result<(), IpcError<T>> {
+        let mut write_buf = self
+            .endpoint
+            .write_buf()
+            .map_err(|e| IpcError::TransportError(e))?;
 
         let (header, payload) = self.framer.prepare_buffer(&mut write_buf)?;
 
@@ -31,13 +36,18 @@ impl<T: Transport> Client<T> {
         message.write_to(&mut writer)?;
 
         let frame_size = self.framer.encode_frame(header, writer.into_inner())?;
-        write_buf.submit(frame_size)?;
+        write_buf
+            .submit(frame_size)
+            .map_err(|e| IpcError::TransportError(e))?;
 
         Ok(())
     }
 
-    pub fn receive_message<B: BytewiseReadOwned>(&mut self) -> Result<Option<B>, IpcError> {
-        let read_buf = self.endpoint.read_buf()?;
+    pub fn receive_message<B: BytewiseReadOwned>(&mut self) -> Result<Option<B>, IpcError<T>> {
+        let read_buf = self
+            .endpoint
+            .read_buf()
+            .map_err(|e| IpcError::TransportError(e))?;
 
         let (data_len, payload) = match self.framer.decode_frame(&read_buf)? {
             Some(result) => result,
@@ -47,14 +57,23 @@ impl<T: Transport> Client<T> {
         let mut reader = BytewiseBuffer::new(payload);
         let message = B::read_from_mut(&mut reader)?;
 
-        read_buf.consume(data_len)?;
+        read_buf
+            .consume(data_len)
+            .map_err(|e| IpcError::TransportError(e))?;
 
         Ok(Some(message))
     }
 
-    pub fn invoke(&mut self, request: &Request) -> Result<Response<'_>, IpcError> {
+    pub fn invoke(&mut self, request: &Request) -> Result<Response<'_>, IpcError<T>> {
         self.send_message(request)?;
-        self.receive_message()?
-            .ok_or(IpcError::TransportError(TransportError::ConnectionNotReady))
+
+        let response = loop {
+            match self.receive_message()? {
+                Some(resp) => break resp,
+                None => continue,
+            }
+        };
+
+        Ok(response)
     }
 }

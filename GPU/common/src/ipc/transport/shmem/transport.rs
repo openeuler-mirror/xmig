@@ -14,53 +14,36 @@
 
 use std::time::Duration;
 
-use crate::ipc::transport::{Transport, TransportError};
+use crate::ipc::transport::Transport;
 
-use super::{channel::ShmemChannel, endpoint::ShmemEndpoint};
+use super::{channel::ShmemChannel, endpoint::ShmemEndpoint, error::ShmemTransportError};
 
 const S2C_SUFFIX: &str = "_s2c";
 const C2S_SUFFIX: &str = "_c2s";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ShmemTransport {
     buffer_size: usize,
     conn_timeout: Duration,
 }
 
 impl Transport for ShmemTransport {
+    type Error = ShmemTransportError;
     type Endpoint = ShmemEndpoint;
-    type Address = String;
+    type Address = str;
 
-    fn create(&self, addr: &Self::Address) -> Result<Self::Endpoint, TransportError> {
-        let read_channel =
-            ShmemChannel::create(format!("{}{}", addr, C2S_SUFFIX), self.buffer_size)?;
-        let write_channel =
-            ShmemChannel::create(format!("{}{}", addr, S2C_SUFFIX), self.buffer_size)?;
+    fn create(&self, addr: &Self::Address) -> Result<Self::Endpoint, Self::Error> {
+        let tx = ShmemChannel::create(format!("{}{}", addr, S2C_SUFFIX), self.buffer_size)?;
+        let rx = ShmemChannel::create(format!("{}{}", addr, C2S_SUFFIX), self.buffer_size)?;
 
-        let path = format!("shmem://{}", addr);
-        let endpoint = ShmemEndpoint {
-            path,
-            read_channel,
-            write_channel,
-        };
-        Ok(endpoint)
+        Ok(ShmemEndpoint::new(tx, rx))
     }
 
-    fn connect(&self, addr: &Self::Address) -> Result<Self::Endpoint, TransportError> {
-        let read_path = format!("{}{}", addr, S2C_SUFFIX);
-        let write_path = format!("{}{}", addr, C2S_SUFFIX);
+    fn connect(&self, addr: &Self::Address) -> Result<Self::Endpoint, Self::Error> {
+        let tx = ShmemChannel::open(format!("{}{}", addr, C2S_SUFFIX), self.conn_timeout)?;
+        let rx = ShmemChannel::open(format!("{}{}", addr, S2C_SUFFIX), self.conn_timeout)?;
 
-        let read_channel = ShmemChannel::open(&read_path, self.conn_timeout)?;
-        let write_channel = ShmemChannel::open(&write_path, self.conn_timeout)?;
-
-        let path = format!("shmem://{}", addr);
-        let endpoint = ShmemEndpoint {
-            path,
-            read_channel,
-            write_channel,
-        };
-
-        Ok(endpoint)
+        Ok(ShmemEndpoint::new(tx, rx))
     }
 }
 
