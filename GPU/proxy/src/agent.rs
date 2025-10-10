@@ -21,9 +21,13 @@ use std::fmt;
 use std::process;
 use std::sync::Once;
 use tracing::debug;
-use xgpu_common::ipc::message::Request;
-use xgpu_common::ipc::server::Server;
-use xgpu_common::ipc::transport::shmem::{ShmemTransport, ShmemTransportBuilder};
+
+use xgpu_common::ipc::{
+    framer::LengthPrefixFramer,
+    message::Request,
+    peer::Server,
+    transport::shmem::{ShmemTransport, ShmemTransportBuilder},
+};
 
 #[derive(Debug)]
 pub enum AgentError {
@@ -49,16 +53,17 @@ impl From<fmt::Error> for AgentError {
 }
 
 lazy_static! {
-    static ref SERVER: Mutex<Option<Server<ShmemTransport>>> = Mutex::new(None);
+    static ref SERVER: Mutex<Option<Server<LengthPrefixFramer, ShmemTransport>>> = Mutex::new(None);
 }
 
 fn client_init(addr: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut server = SERVER.lock();
     if server.is_none() {
+        let framer = LengthPrefixFramer::new(4 * 1024 * 1024);
         let transport = ShmemTransportBuilder::new()
             .buffer_size(4 * 1024 * 1024)
             .build();
-        *server = Some(Server::create(&transport, &addr)?);
+        *server = Some(Server::create(framer, &transport, &addr)?);
         debug!("{:#?}", server);
     }
     Ok(())
