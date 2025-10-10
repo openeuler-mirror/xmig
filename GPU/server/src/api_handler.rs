@@ -42,7 +42,27 @@ pub trait ApiHandler: Send + Sync {
 
 lazy_static! {
     pub static ref FUNC_HANDLER_MAP: IndexMap<u64, Box<dyn ApiHandler>> = indexmap! {
-        (ApiFuncName::FuncCudagetdevicepropertiesV2 as u64) => Box::new(CudaGetDevicePropertiesHandler) as Box<dyn ApiHandler>,
+        (ApiFuncName::FuncCudadevicesynchronize as u64) => Box::new(CudaDeviceSynchronizeHandler) as Box<dyn ApiHandler>,
+        (ApiFuncName::FuncCudadevicegetstreampriorityrange as u64) => Box::new(CudaDeviceGetStreamPriorityRangeHandler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncCudagetlasterror as u64) => Box::new(CudaGetLastErrorHandler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncCudapeekatlasterror as u64) => Box::new(CudaPeekAtLastErrorHandler) as Box<dyn ApiHandler>,
+        (ApiFuncName::FuncCudagetdevicecount as u64) => Box::new(CudaGetDeviceCountHandler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncCudagetdevicepropertiesV2 as u64) => Box::new(CudaGetDevicePropertiesV2Handler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncCudadevicegetattribute as u64) => Box::new(CudaDeviceGetAttributeHandler) as Box<dyn ApiHandler>, //
+        (ApiFuncName::FuncCudasetdevice as u64) => Box::new(CudaSetDeviceHandler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncCudagetdevice as u64) => Box::new(CudaGetDeviceHandler) as Box<dyn ApiHandler>, //?
+        //
+        (ApiFuncName::FuncCudastreamcreatewithpriority as u64) => Box::new(CudaStreamCreateWithPriorityHandler) as Box<dyn ApiHandler>, // bad
+        (ApiFuncName::FuncCudathreadexchangestreamcapturemode as u64) => Box::new(CudaThreadExchangeStreamCaptureModeHandler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncCudamemset as u64) => Box::new(CudaMemsetHandler) as Box<dyn ApiHandler>, //
+        (ApiFuncName::FuncCudapointergetattributes as u64) => Box::new(CudaPointerGetAttributesHandler) as Box<dyn ApiHandler>, //
+
+
+
+        (ApiFuncName::FuncCudeviceget as u64) => Box::new(CuDeviceGetHandler) as Box<dyn ApiHandler>, //
+        //
+        (ApiFuncName::FuncNvmlinitV2 as u64) => Box::new(NvmlInitV2Handler) as Box<dyn ApiHandler>, //ok
+        (ApiFuncName::FuncNcclcommdestroy as u64) => Box::new(NcclCommDestroyHandler) as Box<dyn ApiHandler>, // bad
     };
 }
 

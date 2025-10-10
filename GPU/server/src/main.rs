@@ -15,8 +15,7 @@
 use std::env;
 use tracing::debug;
 use xgpu_common::ipc::client::Client;
-use xgpu_common::ipc::message::Request;
-use xgpu_common::ipc::message::Response;
+use xgpu_common::ipc::message::{Request, Response};
 use xgpu_common::ipc::transport::shmem::ShmemTransportBuilder;
 
 mod api;
@@ -41,17 +40,21 @@ fn main() {
 }
 
 fn serve(addr: String) {
-    let transport = ShmemTransportBuilder::new().build();
+    let transport = ShmemTransportBuilder::new()
+        .buffer_size(4 * 1024 * 1024)
+        .build();
     let mut client = Client::connect(&transport, &addr).unwrap();
     debug!("{:#?}", client);
 
     while let Ok(Some(mut request)) = client.receive_message::<Request>() {
-        debug!(
+        /* debug!(
             "[Server] Received request: request_id={}, method_id={}, argc={}",
             request.request_id(),
             request.method_id(),
             request.argc()
-        );
+        ); */
+
+        //debug!("{:#?}", request);
 
         let method_id = request.method_id();
         let ret = unsafe { call_handler(method_id, request.args_mut()) }
@@ -63,10 +66,10 @@ fn serve(addr: String) {
             .send_message(&response)
             .expect("[server] Failed to send response");
 
-        debug!(
+        /* debug!(
             "[Server] Sending response: request_id={}, method_id={}",
             response.request_id(),
             response.method_id(),
-        );
+        ); */
     }
 }
