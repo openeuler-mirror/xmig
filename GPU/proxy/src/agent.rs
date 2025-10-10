@@ -14,14 +14,13 @@
 
 use ctor::{ctor, dtor};
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
-use std::sync::Once;
-use tracing::debug;
-use cudax::runtime;
 use libc::gettid;
+use parking_lot::Mutex;
 use std::error::Error as StdError;
 use std::fmt;
 use std::process;
+use std::sync::Once;
+use tracing::debug;
 use xgpu_common::ipc::message::Request;
 use xgpu_common::ipc::server::Server;
 use xgpu_common::ipc::transport::shmem::{ShmemTransport, ShmemTransportBuilder};
@@ -30,7 +29,6 @@ use xgpu_common::ipc::transport::shmem::{ShmemTransport, ShmemTransportBuilder};
 pub enum AgentError {
     ServerNotInitialized,
     FmtError(fmt::Error),
-    InvokeError(String),
 }
 
 impl fmt::Display for AgentError {
@@ -38,7 +36,6 @@ impl fmt::Display for AgentError {
         match self {
             AgentError::ServerNotInitialized => write!(f, "Server not initialized"),
             AgentError::FmtError(e) => write!(f, "Format error: {}", e),
-            AgentError::InvokeError(e) => write!(f, "Invoke failed: {}", e),
         }
     }
 }
@@ -58,7 +55,9 @@ lazy_static! {
 fn client_init(addr: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut server = SERVER.lock();
     if server.is_none() {
-        let transport = ShmemTransportBuilder::new().build();
+        let transport = ShmemTransportBuilder::new()
+            .buffer_size(4 * 1024 * 1024)
+            .build();
         *server = Some(Server::create(&transport, &addr)?);
         debug!("{:#?}", server);
     }
@@ -113,31 +112,13 @@ pub fn invoke_api<T: Clone + 'static + std::marker::Copy>(
     let server = guard.as_mut().ok_or(AgentError::ServerNotInitialized)?;
 
     let resp = server.invoke(&req).expect("server.invoke failed");
-    debug!("{:#?}", resp);
+    //debug!("{:#?}", resp);
 
     let ret_arg = *resp.ret_value();
 
     let ret_value = ret_arg.downcast::<T>().unwrap();
-    debug!("[--->] get response ok");
-
-    let out_args = resp.args();
-
-    unsafe {
-        let new_value = out_args[0]
-            .downcast::<runtime::cudaDeviceProp>()
-            .map_err(|_| AgentError::InvokeError("OUT type wrong----2".into()))?;
-
-        debug!(
-            "	new_value: prop major:{}, minor:{}",
-            new_value.major, new_value.minor
-        );
-        let old_ref = req.args_mut()[0]
-            .downcast_mut::<runtime::cudaDeviceProp>()
-            .map_err(|e| debug!("{}", e))
-            .expect("xxxxxxxxxxx");
-
-        *old_ref = new_value;
-    }
+    debug!("[--->] get response ok, updating request args with OUT flag...");
+    req.update_from(&resp).expect("update should succeed");
 
     Ok(ret_value)
 }
