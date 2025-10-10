@@ -38,25 +38,20 @@ mod helper {
 
     pub fn create_connection<T: Transport + 'static>(
         transport: T,
-        addr: T::Address,
-    ) -> Result<(T::Endpoint, T::Endpoint), TransportError> {
+        addr: &T::Address,
+    ) -> Result<(T::Endpoint, T::Endpoint), T::Error> {
         let transport = Arc::new(transport);
 
-        let server = transport.create(&addr)?;
-        debug!("Created '{}'", server);
+        let server = transport.create(addr)?;
         debug!("Server: {:#?}", server);
 
-        let client = transport.connect(&addr)?;
-        debug!("Connected to '{}'", client);
+        let client = transport.connect(addr)?;
         debug!("Client: {:#?}", client);
 
         Ok((server, client))
     }
 
-    pub fn send_message<E: Endpoint>(
-        endpoint: &mut E,
-        message: &[u8],
-    ) -> Result<(), TransportError> {
+    pub fn send_message<E: Endpoint>(endpoint: &mut E, message: &[u8]) -> Result<(), E::Error> {
         let msg_len = message.len();
 
         debug!("Sending message '{}'", String::from_utf8_lossy(message));
@@ -72,10 +67,7 @@ mod helper {
         Ok(())
     }
 
-    pub fn receive_message<E: Endpoint>(
-        endpoint: &mut E,
-        expected: &[u8],
-    ) -> Result<(), TransportError> {
+    pub fn receive_message<E: Endpoint>(endpoint: &mut E, expected: &[u8]) -> Result<(), E::Error> {
         let msg_len = expected.len();
 
         debug!("Receiving message...");
@@ -95,10 +87,7 @@ mod helper {
         Ok(())
     }
 
-    pub fn send_raw_bytes<E: Endpoint>(
-        endpoint: &mut E,
-        message: &[u8],
-    ) -> Result<(), TransportError> {
+    pub fn send_raw_bytes<E: Endpoint>(endpoint: &mut E, message: &[u8]) -> Result<(), E::Error> {
         let total_len = message.len();
         let mut bytes_sent = 0;
 
@@ -126,7 +115,7 @@ mod helper {
     pub fn recv_raw_bytes<E: Endpoint>(
         endpoint: &mut E,
         expected: &[u8],
-    ) -> Result<Vec<u8>, TransportError> {
+    ) -> Result<Vec<u8>, E::Error> {
         let expected_len = expected.len();
         let mut received_data = Vec::with_capacity(expected_len);
 
@@ -135,7 +124,7 @@ mod helper {
 
             let received_len = read_buf.len();
             if received_len == 0 {
-                return Err(TransportError::ConnectionClosed);
+                break;
             }
             received_data.extend_from_slice(&read_buf);
 
@@ -161,8 +150,8 @@ mod test_suits {
 
     pub fn bidirectional_communication<T: Transport + 'static>(
         transport: T,
-        addr: T::Address,
-    ) -> Result<(), TransportError> {
+        address: &T::Address,
+    ) -> Result<(), T::Error> {
         const PING: &[u8] = b"Ping";
         const PONG: &[u8] = b"Pong";
 
@@ -170,7 +159,7 @@ mod test_suits {
         helper::init_test_logger();
 
         // Create server & client
-        let (mut server, mut client) = helper::create_connection(transport, addr)?;
+        let (mut server, mut client) = helper::create_connection(transport, address)?;
 
         // Client send PING
         helper::send_message(&mut client, PING)?;
@@ -189,9 +178,9 @@ mod test_suits {
 
     pub fn transfer_raw_bytes<T: Transport + 'static>(
         transport: T,
-        addr: T::Address,
+        address: &T::Address,
         data_size: usize,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), T::Error> {
         // Initialize logger
         helper::init_test_logger();
 
@@ -201,7 +190,7 @@ mod test_suits {
         let test_data = Arc::new((0..data_size).map(|i| (i % 256) as u8).collect::<Vec<_>>());
 
         // Create server & client
-        let (mut server, mut client) = helper::create_connection(transport, addr)?;
+        let (mut server, mut client) = helper::create_connection(transport, address)?;
 
         // Clone the data for the receiver thread
         let expected_data = test_data.clone();
@@ -262,7 +251,7 @@ mod shmem {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use crate::ipc::transport::shmem::ShmemTransportBuilder;
+    use crate::ipc::transport::shmem::{ShmemTransportBuilder, ShmemTransportError};
 
     use super::*;
 
@@ -291,15 +280,15 @@ mod shmem {
     }
 
     #[test]
-    fn test_bidirectional_communication() -> Result<(), TransportError> {
+    fn test_bidirectional_communication() -> Result<(), ShmemTransportError> {
         let transport = ShmemTransportBuilder::default().build();
-        let addr = unique_shmem_addr();
+        let address = unique_shmem_addr();
 
-        test_suits::bidirectional_communication(transport, addr)
+        test_suits::bidirectional_communication(transport, &address)
     }
 
     #[test]
-    fn test_raw_bytes_transfer() -> Result<(), TransportError> {
+    fn test_raw_bytes_transfer() -> Result<(), ShmemTransportError> {
         const DATA_SIZE: usize = 16 * 1024 * 1024; // 16M
         const BUFFER_SIZE: usize = 16 * 1024; // 16K
         const TEST_TIMEOUT: Duration = Duration::from_millis(200);
@@ -308,8 +297,8 @@ mod shmem {
             .buffer_size(BUFFER_SIZE)
             .connect_timeout(TEST_TIMEOUT)
             .build();
-        let addr = unique_shmem_addr();
+        let address = unique_shmem_addr();
 
-        test_suits::transfer_raw_bytes(transport, addr, DATA_SIZE)
+        test_suits::transfer_raw_bytes(transport, &address, DATA_SIZE)
     }
 }

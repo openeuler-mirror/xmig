@@ -19,7 +19,10 @@
 //! communication. Synchronization is managed by `parking_lot` primitives placed
 //! within the shared memory segment itself.
 
-mod mirrored;
+mod error;
+pub use error::*;
+
+mod memory;
 
 mod buffer;
 mod channel;

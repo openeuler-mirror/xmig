@@ -12,15 +12,14 @@
  * See the Mulan PSL v2 for more details.
  */
 
-pub mod codec;
+pub mod error;
+pub mod framer;
 pub mod transport;
 
 pub mod bytewise;
 pub mod message;
 
-pub mod client;
-pub mod error;
-pub mod server;
+pub mod peer;
 
 #[cfg(test)]
 mod tests {
@@ -38,9 +37,9 @@ mod tests {
     use tracing::debug;
 
     use crate::ipc::{
-        client::Client,
+        framer::LengthPrefixFramer,
         message::{Argument, ArgumentFlag, Request, Response},
-        server::Server,
+        peer::{Client, Server},
         transport::shmem::ShmemTransportBuilder,
     };
 
@@ -92,13 +91,14 @@ mod tests {
 
         self::init_test_logger();
 
+        let framer = LengthPrefixFramer::new(4096);
         let transport = ShmemTransportBuilder::new().build();
         let addr = unique_shmem_addr();
 
-        let mut server = Server::create(&transport, &addr).unwrap();
+        let mut server = Server::create(framer, &transport, &addr).unwrap();
         debug!("{:#?}", server);
 
-        let mut client = Client::connect(&transport, &addr).unwrap();
+        let mut client = Client::connect(framer, &transport, &addr).unwrap();
         debug!("{:#?}", client);
 
         let server_thread = std::thread::spawn(move || {

@@ -14,9 +14,13 @@
 
 use std::env;
 use tracing::debug;
-use xgpu_common::ipc::client::Client;
-use xgpu_common::ipc::message::{Request, Response};
-use xgpu_common::ipc::transport::shmem::ShmemTransportBuilder;
+
+use xgpu_common::ipc::{
+    framer::LengthPrefixFramer,
+    message::{Request, Response},
+    peer::Client,
+    transport::shmem::ShmemTransportBuilder,
+};
 
 mod api;
 mod api_handler;
@@ -43,7 +47,9 @@ fn serve(addr: String) {
     let transport = ShmemTransportBuilder::new()
         .buffer_size(4 * 1024 * 1024)
         .build();
-    let mut client = Client::connect(&transport, &addr).unwrap();
+    let framer = LengthPrefixFramer::new(4 * 1024 * 1024);
+
+    let mut client = Client::connect(framer, &transport, &addr).unwrap();
     debug!("{:#?}", client);
 
     while let Ok(Some(mut request)) = client.receive_message::<Request>() {

@@ -12,6 +12,9 @@
  * See the Mulan PSL v2 for more details.
  */
 
+mod error;
+pub use error::*;
+
 mod argument;
 pub use argument::*;
 

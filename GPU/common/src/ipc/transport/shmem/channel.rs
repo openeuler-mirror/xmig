@@ -24,14 +24,12 @@ use std::{
 
 use linux_futex::{Futex, Shared};
 
-use crate::{
-    ipc::transport::TransportError,
-    sys::{cache::CacheLineAligned, futex::FutexMutex},
-};
+use crate::sys::{cache::CacheLineAligned, futex::FutexMutex};
 
 use super::{
     buffer::{ShmemReadBuffer, ShmemWriteBuffer},
-    mirrored::MirroredShmem,
+    error::ShmemTransportError,
+    memory::ShmemRegion,
 };
 
 #[repr(u8)]
@@ -44,13 +42,13 @@ pub enum ShmemChannelState {
 }
 
 impl TryFrom<u8> for ShmemChannelState {
-    type Error = TransportError;
+    type Error = ShmemTransportError;
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(ShmemChannelState::Uninited),
             1 => Ok(ShmemChannelState::Ready),
             2 => Ok(ShmemChannelState::Closed),
-            _ => Err(TransportError::InvalidConnectionState),
+            _ => Err(ShmemTransportError::InvalidConnectionState),
         }
     }
 }
@@ -81,7 +79,7 @@ pub struct ShmemCtrlBlock {
 
 impl ShmemCtrlBlock {
     #[inline]
-    pub fn get_state(&self) -> Result<ShmemChannelState, TransportError> {
+    pub fn get_state(&self) -> Result<ShmemChannelState, ShmemTransportError> {
         ShmemChannelState::try_from(self.state.load(Ordering::Acquire))
     }
 
@@ -126,12 +124,11 @@ impl ShmemCtrlBlock {
 }
 
 /// Represents a single direction of communication over a shared memory segment.
-/// This implementation is MPMC-safe.
 #[derive(Debug)]
 pub struct ShmemChannel {
-    shmem: MirroredShmem,
-    control: *mut ShmemCtrlBlock,
-    buffer: *mut u8,
+    memory: ShmemRegion,
+    control_ptr: *mut ShmemCtrlBlock,
+    buffer_ptr: *mut u8,
 }
 
 // SAFETY: All access to raw pointers is synchronized by atomic operations and FutexMutexes.
@@ -142,22 +139,34 @@ impl Deref for ShmemChannel {
     type Target = ShmemCtrlBlock;
     fn deref(&self) -> &Self::Target {
         // SAFETY: The control pointer is valid for the lifetime of Channel.
-        unsafe { &*self.control }
+        unsafe { &*self.control_ptr }
     }
 }
 
 impl ShmemChannel {
-    pub fn create<S: AsRef<str>>(name: S, buffer_size: usize) -> Result<Self, TransportError> {
-        let shmem = MirroredShmem::create(name, buffer_size, size_of::<ShmemCtrlBlock>())?;
+    pub fn create<S: AsRef<str>>(name: S, buffer_size: usize) -> Result<Self, ShmemTransportError> {
+        let reserve_size = size_of::<ShmemCtrlBlock>();
 
-        let control_ptr = shmem.reserved_ptr() as *mut ShmemCtrlBlock;
-        let buffer_ptr = shmem.data_ptr();
+        let memory = ShmemRegion::create(&name, buffer_size, reserve_size).map_err(|e| {
+            ShmemTransportError::CreationError {
+                name: name.as_ref().to_owned(),
+                source: e,
+            }
+        })?;
+        let control_ptr = memory.reserved_ptr() as *mut ShmemCtrlBlock;
+        let buffer_ptr = memory.data_ptr();
+
+        let channel = Self {
+            memory,
+            control_ptr,
+            buffer_ptr,
+        };
 
         // SAFETY: The shared memory is newly created and correctly sized.
         // As the owner, we can safely initialize the control block.
         unsafe {
             ptr::write(
-                control_ptr,
+                channel.control_ptr,
                 ShmemCtrlBlock {
                     head: CacheLineAligned(AtomicUsize::new(0)),
                     tail: CacheLineAligned(AtomicUsize::new(0)),
@@ -167,33 +176,32 @@ impl ShmemChannel {
                     writable: CacheLineAligned(Futex::new(0)),
                 },
             );
-
-            let channel = Self {
-                shmem,
-                control: control_ptr,
-                buffer: buffer_ptr,
-            };
-
-            channel.set_state(ShmemChannelState::Ready);
-            Ok(channel)
         }
+        channel.set_state(ShmemChannelState::Ready);
+
+        Ok(channel)
     }
 
-    pub fn open<S: AsRef<str>>(name: S, timeout: Duration) -> Result<Self, TransportError> {
+    pub fn open<S: AsRef<str>>(name: S, timeout: Duration) -> Result<Self, ShmemTransportError> {
         const RETRY_DELAY: Duration = Duration::from_millis(10);
 
         let start_time = Instant::now();
         let shmem = loop {
             if start_time.elapsed() >= timeout {
-                return Err(TransportError::ConnectionTimeout);
+                return Err(ShmemTransportError::ConnectionTimeout);
             }
-            match MirroredShmem::open(&name, size_of::<ShmemCtrlBlock>()) {
+            match ShmemRegion::open(&name, size_of::<ShmemCtrlBlock>()) {
                 Ok(shmem) => break shmem,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     thread::sleep(RETRY_DELAY);
                     continue;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    return Err(ShmemTransportError::OpenError {
+                        name: name.as_ref().to_owned(),
+                        source: e,
+                    });
+                }
             }
         };
 
@@ -201,42 +209,42 @@ impl ShmemChannel {
         let buffer_ptr = shmem.data_ptr();
 
         let channel = Self {
-            shmem,
-            control: control_ptr,
-            buffer: buffer_ptr,
+            memory: shmem,
+            control_ptr,
+            buffer_ptr,
         };
 
         loop {
             if start_time.elapsed() >= timeout {
-                return Err(TransportError::ConnectionTimeout);
+                return Err(ShmemTransportError::ConnectionTimeout);
             }
             match channel.get_state() {
                 Ok(ShmemChannelState::Ready) => return Ok(channel),
-                Ok(ShmemChannelState::Closed) => return Err(TransportError::ConnectionClosed),
-                _ => thread::sleep(Duration::from_millis(5)),
+                Ok(ShmemChannelState::Closed) => return Err(ShmemTransportError::ConnectionClosed),
+                _ => thread::sleep(RETRY_DELAY),
             }
         }
     }
 
     #[inline]
     pub fn name(&self) -> &str {
-        self.shmem.name()
-    }
-    #[inline]
-    pub fn is_owner(&self) -> bool {
-        self.shmem.is_owner()
-    }
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.shmem.data_len()
+        self.memory.name()
     }
 
-    /// Acquires a read buffer. Blocks until data is available.
-    /// This implementation is MPMC-safe and optimized for mirrored memory.
-    pub fn read_buf(&'_ self) -> Result<ShmemReadBuffer<'_>, TransportError> {
+    #[inline]
+    pub fn is_owner(&self) -> bool {
+        self.memory.is_owner()
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.memory.data_len()
+    }
+
+    pub fn read_buf(&'_ self) -> Result<ShmemReadBuffer<'_>, ShmemTransportError> {
         loop {
             if self.get_state()? == ShmemChannelState::Closed {
-                return Err(TransportError::ConnectionClosed);
+                return Err(ShmemTransportError::ConnectionClosed);
             }
 
             let guard = self.buf_lock.lock();
@@ -247,15 +255,13 @@ impl ShmemChannel {
 
             if readable_bytes > 0 {
                 let offset = head % self.capacity();
-                let ptr = unsafe { self.buffer.add(offset) };
+                let ptr = unsafe { self.buffer_ptr.add(offset) };
 
-                // [KEY OPTIMIZATION FOR MIRRORED MEMORY]
                 // We can treat all `readable_bytes` as a single, contiguous slice.
                 // The virtual memory mirroring handles any "wrap-around" seamlessly.
                 return Ok(ShmemReadBuffer::new(guard, self, ptr, readable_bytes));
             }
 
-            // [DEADLOCK PREVENTION]
             // Before releasing the lock, read the current value of the futex event counter.
             let last_value = self.readable.value.load(Ordering::Relaxed);
             drop(guard);
@@ -264,12 +270,10 @@ impl ShmemChannel {
         }
     }
 
-    /// Acquires a write buffer. Blocks until space is available.
-    /// This implementation is MPMC-safe and optimized for mirrored memory.
-    pub fn write_buf(&'_ self) -> Result<ShmemWriteBuffer<'_>, TransportError> {
+    pub fn write_buf(&'_ self) -> Result<ShmemWriteBuffer<'_>, ShmemTransportError> {
         loop {
             if self.get_state()? == ShmemChannelState::Closed {
-                return Err(TransportError::ConnectionClosed);
+                return Err(ShmemTransportError::ConnectionClosed);
             }
 
             let guard = self.buf_lock.lock();
@@ -281,15 +285,13 @@ impl ShmemChannel {
             let writable_bytes = self.capacity() - used_space - 1;
             if writable_bytes > 0 {
                 let offset = tail % self.capacity();
-                let ptr = unsafe { self.buffer.add(offset) };
+                let ptr = unsafe { self.buffer_ptr.add(offset) };
 
-                // [KEY OPTIMIZATION FOR MIRRORED MEMORY]
                 // We can offer the entire `writable_bytes` as a single, contiguous slice.
                 // The virtual memory mirroring handles any "wrap-around" seamlessly.
                 return Ok(ShmemWriteBuffer::new(guard, self, ptr, writable_bytes));
             }
 
-            // [DEADLOCK PREVENTION]
             // Before releasing the lock, read the current value of the futex event counter.
             let last_value = self.writable.value.load(Ordering::Relaxed);
             drop(guard);

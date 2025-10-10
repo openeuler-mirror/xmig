@@ -15,80 +15,51 @@
 use std::{
     error::Error as StdError,
     fmt::{Debug, Display},
-    io::Error as IoError,
     ops::{Deref, DerefMut},
 };
 
-use thiserror::Error;
+pub trait ReadBuf: Debug + Deref<Target = [u8]> + DerefMut {
+    type Error: StdError + Send + Sync + 'static;
 
-#[derive(Error, Debug)]
-pub enum TransportError {
-    #[error("Insufficient buffer capacity (required: {required}, capacity: {capacity})")]
-    InsufficientBuffer { required: usize, capacity: usize },
-
-    #[error(
-        "Consume bytes more than read buffer capacity (consume: {consume}, capacity: {capacity})"
-    )]
-    ReadBufferOverflow { consume: usize, capacity: usize },
-
-    #[error(
-        "Submit bytes more than write buffer capacity (submit: {submit}, capacity: {capacity})"
-    )]
-    WriteBufferOverflow { submit: usize, capacity: usize },
-
-    /// An error indicating connection state is unknown.
-    #[error("Invalid connection state")]
-    InvalidConnectionState,
-
-    /// An error indicating connection is not ready.
-    #[error("Connection not ready")]
-    ConnectionNotReady,
-
-    /// An error indicating connection closed.
-    #[error("Connection closed")]
-    ConnectionClosed,
-
-    /// An error indicating connection timeout.
-    #[error("Connection timeout")]
-    ConnectionTimeout,
-
-    #[error(transparent)]
-    IoError(#[from] IoError),
-
-    #[error(transparent)]
-    NixError(#[from] nix::Error),
-
-    /// An error originating from the underlying error.
-    #[error("Internal error: {0}")]
-    InternalError(#[from] Box<dyn StdError + Send + Sync>),
+    /// Consumes the specified number of bytes from the buffer.
+    fn consume(self, bytes: usize) -> Result<(), Self::Error>;
 }
 
-pub trait ReadBuf: Deref<Target = [u8]> + DerefMut {
-    fn consume(self, bytes: usize) -> Result<(), TransportError>;
+pub trait WriteBuf: Debug + Deref<Target = [u8]> + DerefMut {
+    type Error: StdError + Send + Sync + 'static;
+
+    /// Submits the specified number of bytes to the buffer.
+    fn submit(self, bytes: usize) -> Result<(), Self::Error>;
 }
 
-pub trait WriteBuf: Deref<Target = [u8]> + DerefMut {
-    fn submit(self, bytes: usize) -> Result<(), TransportError>;
-}
+pub trait Endpoint: Debug + Send + Sync {
+    type Error: StdError + Send + Sync + 'static;
 
-pub trait Endpoint: Send + Sync {
-    type ReadBuf<'a>: ReadBuf + Debug
+    type ReadBuf<'a>: ReadBuf<Error = Self::Error> + Debug
     where
         Self: 'a;
-    type WriteBuf<'a>: WriteBuf + Debug
+    type WriteBuf<'a>: WriteBuf<Error = Self::Error> + Debug
     where
         Self: 'a;
 
-    fn read_buf(&mut self) -> Result<Self::ReadBuf<'_>, TransportError>;
-    fn write_buf(&mut self) -> Result<Self::WriteBuf<'_>, TransportError>;
+    /// Acquires a read buffer. Blocks until data is available.
+    fn read_buf(&mut self) -> Result<Self::ReadBuf<'_>, Self::Error>;
+
+    /// Acquires a write buffer. Blocks until space is available.
+    fn write_buf(&mut self) -> Result<Self::WriteBuf<'_>, Self::Error>;
 }
 
-pub trait Transport: Send + Sync {
-    type Endpoint: Endpoint + Debug + Display;
-    type Address: Debug + Send + Sync;
+pub trait Transport: Debug + Send + Sync {
+    type Address: ?Sized + Send + Sync + Debug + Display;
+    type Error: StdError + Send + Sync + 'static;
 
-    fn create(&self, addr: &Self::Address) -> Result<Self::Endpoint, TransportError>;
-    fn connect(&self, addr: &Self::Address) -> Result<Self::Endpoint, TransportError>;
+    type Endpoint: Endpoint<Error = Self::Error>;
+
+    /// Creates a new communication endpoint bound to the given address.
+    fn create(&self, addr: &Self::Address) -> Result<Self::Endpoint, Self::Error>;
+
+    /// Establishes a connection to a remote endpoint at the given address.
+    fn connect(&self, addr: &Self::Address) -> Result<Self::Endpoint, Self::Error>;
 }
 
 pub mod shmem;

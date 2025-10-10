@@ -12,46 +12,48 @@
  * See the Mulan PSL v2 for more details.
  */
 
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 
-use crate::ipc::transport::{Endpoint, TransportError};
+use crate::ipc::transport::Endpoint;
 
 use super::{
     buffer::{ShmemReadBuffer, ShmemWriteBuffer},
     channel::ShmemChannel,
+    error::ShmemTransportError,
 };
 
 /// A `Transport` implementation that uses two shared memory channels for bidirectional communication.
 pub struct ShmemEndpoint {
-    pub(super) path: String,
-    pub(super) read_channel: ShmemChannel,
-    pub(super) write_channel: ShmemChannel,
+    tx: ShmemChannel,
+    rx: ShmemChannel,
+}
+
+impl ShmemEndpoint {
+    #[inline]
+    pub(crate) fn new(tx: ShmemChannel, rx: ShmemChannel) -> Self {
+        Self { tx, rx }
+    }
 }
 
 impl Endpoint for ShmemEndpoint {
+    type Error = ShmemTransportError;
     type ReadBuf<'a> = ShmemReadBuffer<'a>;
     type WriteBuf<'a> = ShmemWriteBuffer<'a>;
 
-    fn read_buf(&mut self) -> Result<Self::ReadBuf<'_>, TransportError> {
-        self.read_channel.read_buf()
+    fn read_buf(&mut self) -> Result<Self::ReadBuf<'_>, Self::Error> {
+        self.rx.read_buf()
     }
 
-    fn write_buf(&mut self) -> Result<Self::WriteBuf<'_>, TransportError> {
-        self.write_channel.write_buf()
+    fn write_buf(&mut self) -> Result<Self::WriteBuf<'_>, Self::Error> {
+        self.tx.write_buf()
     }
 }
 
 impl Debug for ShmemEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShmemEndpoint")
-            .field("read_channel", &self.read_channel)
-            .field("write_channel", &self.write_channel)
+            .field("tx", &self.tx)
+            .field("rx", &self.rx)
             .finish()
-    }
-}
-
-impl Display for ShmemEndpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.path, f)
     }
 }
