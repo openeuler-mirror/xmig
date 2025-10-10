@@ -15,7 +15,6 @@
 use std::{env, path::Path};
 
 const CUDA_HOME: &str = "/usr/local/cuda";          // if you DO NOT have the environment variable, replace it with your own path
-const NCCL_SRC_HOME: &str = "/usr/local/nccl";      // if you DO NOT have the environment variable, replace it with your own path
 
 fn multiarch_path() -> &'static str {
     let dir = match env::consts::ARCH {
@@ -34,9 +33,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cuda_home = env::var("CUDA_HOME")
             .unwrap_or(CUDA_HOME.to_string());
     let cuda_home = Path::new(&cuda_home);
-    let nccl_src_home = env::var("NCCL_SRC_HOME")
-            .unwrap_or(NCCL_SRC_HOME.to_string());
-    let nccl_src_home = Path::new(&nccl_src_home);
 
     // dynamic library
     let lib_paths = [
@@ -72,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // static library 
     let lib_paths = [
-        nccl_src_home.join("build/lib"),
+        &Path::new(&format!("/usr/lib/{}", multiarch_path())).to_path_buf(),
     ];
     let lib_names = [
         "nccl_static"
