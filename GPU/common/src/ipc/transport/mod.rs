@@ -37,7 +37,7 @@ pub trait WriteBuf: Debug + Deref<Target = [u8]> + DerefMut {
 }
 
 /// A bidirectional communication endpoint for IPC.
-pub trait Endpoint: Debug + Send + Sync {
+pub trait Endpoint: Debug + Send + Sync + 'static {
     /// The error type for transport operations.
     type Error: StdError + Send + Sync + 'static;
 
@@ -63,7 +63,7 @@ pub trait Endpoint: Debug + Send + Sync {
 /// Implementations provide transport-specific ways to create and connect
 /// to endpoints using address-based identifiers. This trait serves as the
 /// main entry point for establishing IPC communication channels.
-pub trait Transport: Debug + Send + Sync {
+pub trait Transport: Debug + Send + Sync + 'static {
     /// The address type used to identify endpoints.
     type Address: ?Sized + Send + Sync + Debug + Display;
 
