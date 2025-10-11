@@ -44,9 +44,9 @@ impl BytewiseWrite for RequestMetadata {
 
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
-    pub(super) request_id: u64,
-    pub(super) method_id: u64,
-    pub(super) arg_list: Vec<Argument<'a>>,
+    request_id: u64,
+    method_id: u64,
+    arg_list: Vec<Argument<'a>>,
 }
 
 impl<'a> Request<'a> {

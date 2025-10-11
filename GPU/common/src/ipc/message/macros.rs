@@ -252,8 +252,8 @@ mod tests {
         let mut output_buffer = [0u8; 4];
 
         let empty_req = request!(102);
-        assert_eq!(empty_req.method_id, 102);
-        assert!(empty_req.arg_list.is_empty());
+        assert_eq!(empty_req.method_id(), 102);
+        assert!(empty_req.args().is_empty());
 
         let req = request!(
             101,
@@ -265,7 +265,7 @@ mod tests {
         );
 
         println!("Request: {:#?}", req);
-        assert_eq!(req.method_id, 101);
-        assert_eq!(req.arg_list.len(), 3);
+        assert_eq!(req.method_id(), 101);
+        assert_eq!(req.args().len(), 3);
     }
 }

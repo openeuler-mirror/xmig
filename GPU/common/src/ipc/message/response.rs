@@ -59,10 +59,10 @@ impl<'a> Response<'a> {
 
     #[inline]
     pub fn with_request<'b: 'a>(request: &Request<'a>, ret_value: Argument<'b>) -> Self {
-        let request_id = request.request_id;
-        let method_id = request.method_id;
+        let request_id = request.request_id();
+        let method_id = request.method_id();
         let arg_list = request
-            .arg_list
+            .args()
             .iter()
             .map(|argument| {
                 // Replace non-out argument to empty to save memory, but keep it's index
