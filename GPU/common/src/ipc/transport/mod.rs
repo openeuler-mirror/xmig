@@ -18,41 +18,59 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+/// A buffer trait for reading bytes from an endpoint.
 pub trait ReadBuf: Debug + Deref<Target = [u8]> + DerefMut {
+    /// The error type for transport operations.
     type Error: StdError + Send + Sync + 'static;
 
     /// Consumes the specified number of bytes from the buffer.
     fn consume(self, bytes: usize) -> Result<(), Self::Error>;
 }
 
+/// A buffer trait for writing bytes to an endpoint.
 pub trait WriteBuf: Debug + Deref<Target = [u8]> + DerefMut {
+    /// The error type for transport operations.
     type Error: StdError + Send + Sync + 'static;
 
-    /// Submits the specified number of bytes to the buffer.
+    /// Submits the specified number of bytes to the buffer for transmission.
     fn submit(self, bytes: usize) -> Result<(), Self::Error>;
 }
 
+/// A bidirectional communication endpoint for IPC.
 pub trait Endpoint: Debug + Send + Sync {
+    /// The error type for transport operations.
     type Error: StdError + Send + Sync + 'static;
 
+    /// The read buffer type for this endpoint.
     type ReadBuf<'a>: ReadBuf<Error = Self::Error> + Debug
     where
         Self: 'a;
+
+    /// The write buffer type for this endpoint.
     type WriteBuf<'a>: WriteBuf<Error = Self::Error> + Debug
     where
         Self: 'a;
 
     /// Acquires a read buffer. Blocks until data is available.
-    fn read_buf(&mut self) -> Result<Self::ReadBuf<'_>, Self::Error>;
+    fn read(&mut self) -> Result<Self::ReadBuf<'_>, Self::Error>;
 
     /// Acquires a write buffer. Blocks until space is available.
-    fn write_buf(&mut self) -> Result<Self::WriteBuf<'_>, Self::Error>;
+    fn write(&mut self) -> Result<Self::WriteBuf<'_>, Self::Error>;
 }
 
+/// A factory for creating IPC communication endpoints.
+///
+/// Implementations provide transport-specific ways to create and connect
+/// to endpoints using address-based identifiers. This trait serves as the
+/// main entry point for establishing IPC communication channels.
 pub trait Transport: Debug + Send + Sync {
+    /// The address type used to identify endpoints.
     type Address: ?Sized + Send + Sync + Debug + Display;
+
+    /// The error type for transport operations.
     type Error: StdError + Send + Sync + 'static;
 
+    /// The endpoint type produced by this transport.
     type Endpoint: Endpoint<Error = Self::Error>;
 
     /// Creates a new communication endpoint bound to the given address.

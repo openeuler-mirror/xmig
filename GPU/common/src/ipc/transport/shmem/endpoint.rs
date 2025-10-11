@@ -40,11 +40,11 @@ impl Endpoint for ShmemEndpoint {
     type ReadBuf<'a> = ShmemReadBuffer<'a>;
     type WriteBuf<'a> = ShmemWriteBuffer<'a>;
 
-    fn read_buf(&mut self) -> Result<Self::ReadBuf<'_>, Self::Error> {
+    fn read(&mut self) -> Result<Self::ReadBuf<'_>, Self::Error> {
         self.rx.read_buf()
     }
 
-    fn write_buf(&mut self) -> Result<Self::WriteBuf<'_>, Self::Error> {
+    fn write(&mut self) -> Result<Self::WriteBuf<'_>, Self::Error> {
         self.tx.write_buf()
     }
 }
