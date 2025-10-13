@@ -185,7 +185,7 @@ impl MirroredMmap {
 
     /// Returns the length of the reserved region (A).
     #[inline]
-    pub fn reserved_len(&self) -> usize {
+    pub fn resv_len(&self) -> usize {
         self.resv_len
     }
 
@@ -238,7 +238,7 @@ mod tests {
         let shmem = Shmem::create("/test_mirrored_mmap", MAP_SIZE)?;
         let mmap = MirroredMmap::mmap_from(&shmem, MAP_SIZE, RESERVE_SIZE)?;
 
-        assert_eq!(mmap.reserved_len(), RESERVE_SIZE);
+        assert_eq!(mmap.resv_len(), RESERVE_SIZE);
         assert_eq!(mmap.data_len(), DATA_SIZE);
         assert_eq!(mmap.mirrored_len(), DATA_SIZE);
         assert_eq!(mmap.total_len(), TOTAL_SIZE);

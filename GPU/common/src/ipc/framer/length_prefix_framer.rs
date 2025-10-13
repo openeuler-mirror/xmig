@@ -15,6 +15,7 @@
 use std::ops::{Deref, DerefMut};
 
 use thiserror::Error;
+use tracing::debug;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, NativeEndian, U32};
 
 use super::{Frame, FrameBuf, Framer};
@@ -117,6 +118,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> FrameBuf for LengthPrefixFrameBuffer<B> {
             .write_to_prefix(header_buf)
             .expect("Header buffer is correctly sized");
 
+        debug!(
+            "[Frame] Encoded {} bytes (payload {} bytes)",
+            frame_len, payload_len
+        );
         Ok(frame_len)
     }
 }
@@ -196,7 +201,8 @@ impl Framer for LengthPrefixFramer {
         }
 
         /* Check frame size */
-        let frame_len = header_len + header.length.get() as usize;
+        let payload_len = header.length.get() as usize;
+        let frame_len = header_len + payload_len;
         if frame_len > self.limit {
             return Err(LengthPrefixFramerError::FrameTooLarge {
                 limit: self.limit,
@@ -229,6 +235,10 @@ impl Framer for LengthPrefixFramer {
             });
         }
 
+        debug!(
+            "[Frame] Decoded {} bytes (payload {} bytes)",
+            frame_len, payload_len
+        );
         Ok(Some(LengthPrefixFrame { payload }))
     }
 }

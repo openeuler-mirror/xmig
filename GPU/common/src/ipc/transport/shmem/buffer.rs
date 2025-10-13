@@ -17,6 +17,8 @@ use std::{
     sync::atomic::Ordering,
 };
 
+use tracing::debug;
+
 use crate::{
     ipc::transport::{ReadBuf, WriteBuf},
     sys::futex::FutexMutexGuard,
@@ -91,10 +93,14 @@ impl<'a> DerefMut for ShmemReadBuffer<'a> {
 
 impl Drop for ShmemReadBuffer<'_> {
     fn drop(&mut self) {
+        debug!("[Shmem] '{}': Read {} bytes", self.channel, self.consumed,);
+
         if self.consumed > 0 {
             self.channel
                 .head
                 .fetch_add(self.consumed, Ordering::Release);
+
+            debug!("[Shmem] '{}': Notify writable", self.channel);
             self.channel.notify_writable();
         }
     }
@@ -166,10 +172,14 @@ impl<'a> DerefMut for ShmemWriteBuffer<'a> {
 
 impl Drop for ShmemWriteBuffer<'_> {
     fn drop(&mut self) {
+        debug!("[Shmem] '{}': Wrote {} bytes", self.channel, self.submitted);
+
         if self.submitted > 0 {
             self.channel
                 .tail
                 .fetch_add(self.submitted, Ordering::Release);
+
+            debug!("[Shmem] '{}': Notify readable", self.channel);
             self.channel.notify_readable();
         }
     }

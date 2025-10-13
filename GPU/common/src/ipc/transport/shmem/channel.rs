@@ -23,6 +23,7 @@ use std::{
 };
 
 use linux_futex::{Futex, Shared};
+use tracing::debug;
 
 use crate::sys::{cache::CacheLineAligned, futex::FutexMutex};
 
@@ -178,6 +179,7 @@ impl ShmemChannel {
             );
         }
         channel.set_state(ShmemChannelState::Ready);
+        debug!("[Shmem] '{}': Ready", channel);
 
         Ok(channel)
     }
@@ -219,11 +221,14 @@ impl ShmemChannel {
                 return Err(ShmemTransportError::ConnectionTimeout);
             }
             match channel.get_state() {
-                Ok(ShmemChannelState::Ready) => return Ok(channel),
+                Ok(ShmemChannelState::Ready) => break,
                 Ok(ShmemChannelState::Closed) => return Err(ShmemTransportError::ConnectionClosed),
                 _ => thread::sleep(RETRY_DELAY),
             }
         }
+
+        debug!("[Shmem] '{}': Ready", channel);
+        Ok(channel)
     }
 
     #[inline]
@@ -259,6 +264,7 @@ impl ShmemChannel {
 
                 // We can treat all `readable_bytes` as a single, contiguous slice.
                 // The virtual memory mirroring handles any "wrap-around" seamlessly.
+                debug!("[Shmem] '{}': Reading...", self);
                 return Ok(ShmemReadBuffer::new(guard, self, ptr, readable_bytes));
             }
 
@@ -266,6 +272,7 @@ impl ShmemChannel {
             let last_value = self.readable.value.load(Ordering::Relaxed);
             drop(guard);
 
+            debug!("[Shmem] '{}': Waiting readable...", self);
             self.wait_readable(last_value);
         }
     }
@@ -289,6 +296,7 @@ impl ShmemChannel {
 
                 // We can offer the entire `writable_bytes` as a single, contiguous slice.
                 // The virtual memory mirroring handles any "wrap-around" seamlessly.
+                debug!("[Shmem] '{}': Writting...", self);
                 return Ok(ShmemWriteBuffer::new(guard, self, ptr, writable_bytes));
             }
 
@@ -296,12 +304,15 @@ impl ShmemChannel {
             let last_value = self.writable.value.load(Ordering::Relaxed);
             drop(guard);
 
+            debug!("[Shmem] '{}': Waiting writable...", self);
             self.wait_writable(last_value);
         }
     }
 
     pub fn close(&self) {
         self.set_state(ShmemChannelState::Closed);
+
+        debug!("[Shmem] '{}': Closed", self);
         self.notify_all_readable();
         self.notify_all_writable();
     }
