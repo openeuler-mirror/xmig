@@ -232,9 +232,18 @@ impl Argument<'_> {
         let value = ArgumentValue::Ref(
             {
                 let ptr = ptr::NonNull::new(ptr.cast_mut().cast()).expect("Invalid null pointer");
-                if meta.type_size != 0 && ptr == ptr::NonNull::dangling() {
-                    panic!("Invalid dangling pointer");
+                if ptr != ptr::NonNull::dangling() {
+                    assert!(
+                        meta.type_size != 0,
+                        "Pointer should not point to zero-sized type"
+                    );
+                } else {
+                    assert!(
+                        meta.type_size == 0,
+                        "Dangling pointer should not point to non-zero-sized type"
+                    );
                 }
+
                 ptr
             },
             PhantomData,
@@ -270,9 +279,18 @@ impl Argument<'_> {
         let value = ArgumentValue::Mut(
             {
                 let ptr = ptr::NonNull::new(ptr.cast()).expect("Invalid null pointer");
-                if meta.type_size != 0 && ptr == ptr::NonNull::dangling() {
-                    panic!("Invalid dangling pointer");
+                if ptr != ptr::NonNull::dangling() {
+                    assert!(
+                        meta.type_size != 0,
+                        "Pointer should not point to zero-sized type"
+                    );
+                } else {
+                    assert!(
+                        meta.type_size == 0,
+                        "Dangling pointer should not point to non-zero-sized type"
+                    );
                 }
+
                 ptr
             },
             PhantomData,
