@@ -43,10 +43,7 @@ mod helper {
         let transport = Arc::new(transport);
 
         let server = transport.create(addr)?;
-        debug!("Server: {:#?}", server);
-
         let client = transport.connect(addr)?;
-        debug!("Client: {:#?}", client);
 
         Ok((server, client))
     }

@@ -12,9 +12,10 @@
  * See the Mulan PSL v2 for more details.
  */
 
-use std::io;
+use std::{io, os::fd::AsRawFd};
 
 use nix::errno::Errno;
+use tracing::debug;
 
 use crate::sys::{mmap::MirroredMmap, page, shmem::Shmem};
 
@@ -30,18 +31,36 @@ impl ShmemRegion {
         let resv_len = page::page_align(reserve);
         let file_len = data_len.checked_add(resv_len).ok_or(Errno::EINVAL)?;
 
-        let shmem = Shmem::create(name, file_len)?;
+        let shmem = Shmem::create(&name, file_len)?;
         let mapping = MirroredMmap::mmap_from(&shmem, file_len, resv_len)?;
 
+        debug!(
+            "[Shmem] Shmem '{}' created, fd={}, base_ptr={:p}, total_len={}, resv_len={}, data_len={}",
+            shmem,
+            shmem.as_raw_fd(),
+            mapping.base_ptr(),
+            mapping.total_len(),
+            mapping.resv_len(),
+            mapping.data_len(),
+        );
         Ok(Self { shmem, mapping })
     }
 
-    pub fn open<S: AsRef<str>>(name: S, reserved: usize) -> io::Result<Self> {
-        let resv_len = page::page_align(reserved);
+    pub fn open<S: AsRef<str>>(name: S, reserve: usize) -> io::Result<Self> {
+        let resv_len = page::page_align(reserve);
 
-        let shmem = Shmem::open(name)?;
+        let shmem = Shmem::open(&name)?;
         let mapping = MirroredMmap::mmap_from(&shmem, shmem.size(), resv_len)?;
 
+        debug!(
+            "[Shmem] Shmem '{}' opened, fd={}, base_ptr={:p}, total_len={}, resv_len={}, data_len={}",
+            shmem,
+            shmem.as_raw_fd(),
+            mapping.base_ptr(),
+            mapping.total_len(),
+            mapping.resv_len(),
+            mapping.data_len(),
+        );
         Ok(Self { shmem, mapping })
     }
 
@@ -95,7 +114,7 @@ mod tests {
         let expected_file_len = page::page_align(SHMEM_LEN + expected_reserved_len);
         let expected_data_len = expected_file_len - expected_reserved_len;
 
-        assert_eq!(shmem1.mapping.reserved_len(), expected_reserved_len);
+        assert_eq!(shmem1.mapping.resv_len(), expected_reserved_len);
         assert_eq!(shmem1.data_len(), expected_data_len);
         assert_eq!(
             shmem1.mapping.total_len(),
@@ -115,7 +134,7 @@ mod tests {
         assert_ne!(shmem1.reserved_ptr(), shmem2.reserved_ptr());
         assert_ne!(shmem1.data_ptr(), shmem2.data_ptr());
         assert_eq!(shmem1.data_len(), shmem2.data_len());
-        assert_eq!(shmem1.mapping.reserved_len(), shmem2.mapping.reserved_len());
+        assert_eq!(shmem1.mapping.resv_len(), shmem2.mapping.resv_len());
         assert_eq!(shmem1.mapping.total_len(), shmem2.mapping.total_len());
 
         let shmem1_data_slice =
