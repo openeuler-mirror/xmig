@@ -626,8 +626,7 @@ impl BytewiseReadOwned for Argument<'_> {
 
         // Read argument value
         // TODO: This `read_raw` call requires argument value impl `Copy` trait
-        let data_ptr =
-            unsafe { reader.read_raw(argument.meta.type_size, argument.meta.type_align)? };
+        let data_ptr = unsafe { reader.read_raw(argument.total_size(), argument.meta.type_align)? };
         let value = ArgumentValue::Ref(data_ptr, PhantomData);
 
         // Update argument value
@@ -648,7 +647,7 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument value
         let data_ptr = unsafe {
             // TODO: `read_raw` call requires argument value impl `Copy` trait
-            reader.read_raw(argument.meta.type_size, argument.meta.type_align)?
+            reader.read_raw(argument.total_size(), argument.meta.type_align)?
         };
         let value = ArgumentValue::Mut(data_ptr, PhantomData);
 
