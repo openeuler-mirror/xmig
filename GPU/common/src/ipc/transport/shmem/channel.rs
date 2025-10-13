@@ -311,8 +311,6 @@ impl ShmemChannel {
 
     pub fn close(&self) {
         self.set_state(ShmemChannelState::Closed);
-
-        debug!("[Shmem] '{}': Closed", self);
         self.notify_all_readable();
         self.notify_all_writable();
     }
