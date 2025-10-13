@@ -14,6 +14,7 @@
 
 use std::{
     error::Error as StdError,
+    fmt::Debug,
     ops::{Deref, DerefMut},
 };
 
@@ -34,7 +35,7 @@ pub trait FrameBuf: Deref<Target = [u8]> + DerefMut {
 }
 
 /// A trait for types that can encode and decode frames from byte buffers.
-pub trait Framer {
+pub trait Framer: Debug + Send + Sync + 'static {
     /// The error type returned by codec operations.
     type Error: StdError + Send + Sync + 'static;
 

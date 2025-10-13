@@ -37,7 +37,7 @@ impl<F: Framer, T: Transport> Peer<F, T> {
     pub fn send_message<B: BytewiseWrite>(&mut self, message: &B) -> Result<(), IpcError<F, T>> {
         let mut write_buf = self
             .endpoint
-            .write_buf()
+            .write()
             .map_err(|e| IpcError::TransportError(e))?;
 
         let mut frame_buf = self.framer.encode_frame(&mut write_buf);
@@ -60,7 +60,7 @@ impl<F: Framer, T: Transport> Peer<F, T> {
     pub fn receive_message<B: BytewiseReadOwned>(&mut self) -> Result<Option<B>, IpcError<F, T>> {
         let read_buf = self
             .endpoint
-            .read_buf()
+            .read()
             .map_err(|e| IpcError::TransportError(e))?;
 
         let frame = match self

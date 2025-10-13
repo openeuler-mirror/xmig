@@ -57,7 +57,7 @@ mod helper {
         debug!("Sending message '{}'", String::from_utf8_lossy(message));
 
         // Write message to buffer
-        let mut write_buf = endpoint.write_buf()?;
+        let mut write_buf = endpoint.write()?;
         write_buf[..message.len()].copy_from_slice(message);
 
         // Submit changes
@@ -73,7 +73,7 @@ mod helper {
         debug!("Receiving message...");
 
         // Read message from buffer
-        let read_buf = endpoint.read_buf()?;
+        let read_buf = endpoint.read()?;
         let message = &read_buf[..expected.len()];
 
         // Validate message
@@ -92,7 +92,7 @@ mod helper {
         let mut bytes_sent = 0;
 
         while bytes_sent < total_len {
-            let mut write_buf = endpoint.write_buf()?;
+            let mut write_buf = endpoint.write()?;
 
             // Determine the size of the next chunk to send
             let chunk_size = std::cmp::min(
@@ -120,7 +120,7 @@ mod helper {
         let mut received_data = Vec::with_capacity(expected_len);
 
         while received_data.len() < expected_len {
-            let read_buf = endpoint.read_buf()?;
+            let read_buf = endpoint.read()?;
 
             let received_len = read_buf.len();
             if received_len == 0 {
