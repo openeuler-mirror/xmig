@@ -232,9 +232,18 @@ impl Argument<'_> {
         let value = ArgumentValue::Ref(
             {
                 let ptr = ptr::NonNull::new(ptr.cast_mut().cast()).expect("Invalid null pointer");
-                if meta.type_size != 0 && ptr == ptr::NonNull::dangling() {
-                    panic!("Invalid dangling pointer");
+                if ptr != ptr::NonNull::dangling() {
+                    assert!(
+                        meta.type_size != 0,
+                        "Pointer should not point to zero-sized type"
+                    );
+                } else {
+                    assert!(
+                        meta.type_size == 0,
+                        "Dangling pointer should not point to non-zero-sized type"
+                    );
                 }
+
                 ptr
             },
             PhantomData,
@@ -270,9 +279,18 @@ impl Argument<'_> {
         let value = ArgumentValue::Mut(
             {
                 let ptr = ptr::NonNull::new(ptr.cast()).expect("Invalid null pointer");
-                if meta.type_size != 0 && ptr == ptr::NonNull::dangling() {
-                    panic!("Invalid dangling pointer");
+                if ptr != ptr::NonNull::dangling() {
+                    assert!(
+                        meta.type_size != 0,
+                        "Pointer should not point to zero-sized type"
+                    );
+                } else {
+                    assert!(
+                        meta.type_size == 0,
+                        "Dangling pointer should not point to non-zero-sized type"
+                    );
                 }
+
                 ptr
             },
             PhantomData,
@@ -608,8 +626,7 @@ impl BytewiseReadOwned for Argument<'_> {
 
         // Read argument value
         // TODO: This `read_raw` call requires argument value impl `Copy` trait
-        let data_ptr =
-            unsafe { reader.read_raw(argument.meta.type_size, argument.meta.type_align)? };
+        let data_ptr = unsafe { reader.read_raw(argument.total_size(), argument.meta.type_align)? };
         let value = ArgumentValue::Ref(data_ptr, PhantomData);
 
         // Update argument value
@@ -630,7 +647,7 @@ impl BytewiseReadOwned for Argument<'_> {
         // Read argument value
         let data_ptr = unsafe {
             // TODO: `read_raw` call requires argument value impl `Copy` trait
-            reader.read_raw(argument.meta.type_size, argument.meta.type_align)?
+            reader.read_raw(argument.total_size(), argument.meta.type_align)?
         };
         let value = ArgumentValue::Mut(data_ptr, PhantomData);
 
